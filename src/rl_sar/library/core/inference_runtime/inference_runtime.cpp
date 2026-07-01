@@ -58,6 +58,19 @@ bool TorchModel::load(const std::string& model_path)
 
 std::vector<float> TorchModel::forward(const std::vector<std::vector<float>>& inputs)
 {
+    if (inputs.empty())
+    {
+        throw std::runtime_error("TorchModel::forward received no inputs");
+    }
+
+    return this->forward_with_shapes(inputs, {{1, static_cast<int64_t>(inputs[0].size())}});
+}
+
+std::vector<float> TorchModel::forward_with_shapes(
+    const std::vector<std::vector<float>>& inputs,
+    const std::vector<std::vector<int64_t>>& input_shapes
+)
+{
     if (!loaded_)
     {
         throw std::runtime_error("Model not loaded");
@@ -66,9 +79,26 @@ std::vector<float> TorchModel::forward(const std::vector<std::vector<float>>& in
 #ifdef USE_TORCH
     try
     {
-        // Convert input vector to Torch tensor (use first input only)
-        const auto& input = inputs[0];
-        auto input_tensor = torch::tensor(input, torch::kFloat32).reshape({1, static_cast<int64_t>(input.size())});
+        if (inputs.empty() || inputs.size() != input_shapes.size())
+        {
+            throw std::runtime_error("TorchModel input data and shape counts do not match");
+        }
+
+        std::vector<torch::jit::IValue> torch_inputs;
+        torch_inputs.reserve(inputs.size());
+        for (size_t i = 0; i < inputs.size(); ++i)
+        {
+            int64_t expected_elements = 1;
+            for (int64_t dim : input_shapes[i])
+            {
+                expected_elements *= dim;
+            }
+            if (expected_elements != static_cast<int64_t>(inputs[i].size()))
+            {
+                throw std::runtime_error("TorchModel input size does not match requested tensor shape");
+            }
+            torch_inputs.emplace_back(vector_to_torch(inputs[i], input_shapes[i]));
+        }
 
         // Disable gradient computation before each forward pass
         torch::autograd::GradMode::set_enabled(false);
@@ -77,7 +107,7 @@ std::vector<float> TorchModel::forward(const std::vector<std::vector<float>>& in
         torch::set_num_threads(1);
 
         // Execute forward inference
-        auto output = model_.forward({input_tensor}).toTensor();
+        auto output = model_.forward(torch_inputs).toTensor();
 
         // Convert output tensor to vector
         return torch_to_vector(output);

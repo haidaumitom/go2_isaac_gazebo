@@ -1,5 +1,10 @@
 #include "rl_sim.hpp"
 
+#include <chrono>
+#include <cmath>
+#include <iomanip>
+#include <sstream>
+
 RL_Sim::RL_Sim(int argc, char **argv)
 {
     ros2_node = std::make_shared<rclcpp::Node>("rl_sim_node");
@@ -57,6 +62,8 @@ RL_Sim::RL_Sim(int argc, char **argv)
         std::cout << LOGGER::ERROR << "[FSM] No FSM registered for robot: " << this->robot_name << std::endl;
     }
 
+    this->LoadRecoveryPolicy();
+
     // init robot
     this->robot_command_publisher_msg.motor_command.resize(this->params.Get<int>("num_of_dofs"));
     this->robot_state_subscriber_msg.motor_state.resize(this->params.Get<int>("num_of_dofs"));
@@ -91,10 +98,80 @@ RL_Sim::RL_Sim(int argc, char **argv)
         "/model_states", rclcpp::SystemDefaultsQoS(),
         [this] (const gazebo_msgs::msg::ModelStates::SharedPtr msg) {this->ModelStatesCallback(msg);}
     );
+    this->link_state_subscriber = ros2_node->create_subscription<gazebo_msgs::msg::LinkStates>(
+        "/gazebo/link_states", rclcpp::SystemDefaultsQoS(),
+        [this] (const gazebo_msgs::msg::LinkStates::SharedPtr msg) {this->LinkStatesCallback(msg);}
+    );
+    this->link_state_subscriber_root = ros2_node->create_subscription<gazebo_msgs::msg::LinkStates>(
+        "/link_states", rclcpp::SystemDefaultsQoS(),
+        [this] (const gazebo_msgs::msg::LinkStates::SharedPtr msg) {this->LinkStatesCallback(msg);}
+    );
     this->robot_state_subscriber = ros2_node->create_subscription<robot_msgs::msg::RobotState>(
         this->ros_namespace + "robot_joint_controller/state", rclcpp::SystemDefaultsQoS(),
         [this] (const robot_msgs::msg::RobotState::SharedPtr msg) {this->RobotStateCallback(msg);}
     );
+    if (this->fault_switch_enabled)
+    {
+        const std::string fault_alpha_topic = this->params.Get<std::string>(
+            "fault_alpha_topic",
+            this->ros_namespace + "robot_joint_controller/fault_alpha"
+        );
+        this->fault_alpha_subscriber = ros2_node->create_subscription<std_msgs::msg::Float32MultiArray>(
+            fault_alpha_topic, rclcpp::SystemDefaultsQoS(),
+            [this] (const std_msgs::msg::Float32MultiArray::SharedPtr msg) {this->FaultAlphaCallback(msg);}
+        );
+        std::cout << LOGGER::INFO << "Fault policy switch listening on " << fault_alpha_topic << std::endl;
+    }
+    const std::string gain_alpha_topic = this->params.Get<std::string>(
+        "gain_alpha_topic",
+        "/rl_sar/gain_alpha"
+    );
+    this->gain_alpha_subscriber = ros2_node->create_subscription<std_msgs::msg::Float32MultiArray>(
+        gain_alpha_topic, rclcpp::SystemDefaultsQoS(),
+        [this] (const std_msgs::msg::Float32MultiArray::SharedPtr msg) {this->GainAlphaCallback(msg);}
+    );
+    std::cout << LOGGER::INFO << "RL gain fault listening on " << gain_alpha_topic << std::endl;
+    const std::string foot_contacts_topic = this->params.Get<std::string>(
+        "foot_contacts_topic",
+        "/rl_sar/foot_contacts"
+    );
+    this->foot_contacts_subscriber = ros2_node->create_subscription<std_msgs::msg::Float32MultiArray>(
+        foot_contacts_topic, rclcpp::SystemDefaultsQoS(),
+        [this] (const std_msgs::msg::Float32MultiArray::SharedPtr msg) {this->FootContactsCallback(msg);}
+    );
+    std::cout << LOGGER::INFO << "Foot contact observation listening on " << foot_contacts_topic << std::endl;
+    const std::vector<std::string> default_gazebo_foot_contact_topics = {
+        "/FL_foot_contact",
+        "/FR_foot_contact",
+        "/RL_foot_contact",
+        "/RR_foot_contact"
+    };
+    const auto gazebo_foot_contact_topics = this->params.Get<std::vector<std::string>>(
+        "gazebo_foot_contact_topics",
+        default_gazebo_foot_contact_topics
+    );
+    if (gazebo_foot_contact_topics.size() == 4)
+    {
+        this->gazebo_foot_contact_subscribers.reserve(gazebo_foot_contact_topics.size());
+        for (size_t foot_id = 0; foot_id < gazebo_foot_contact_topics.size(); ++foot_id)
+        {
+            this->gazebo_foot_contact_subscribers.push_back(
+                ros2_node->create_subscription<gazebo_msgs::msg::ContactsState>(
+                    gazebo_foot_contact_topics[foot_id],
+                    rclcpp::SystemDefaultsQoS(),
+                    [this, foot_id] (const gazebo_msgs::msg::ContactsState::SharedPtr msg)
+                    {
+                        this->GazeboFootContactCallback(foot_id, msg);
+                    }
+                )
+            );
+        }
+        std::cout << LOGGER::INFO << "Direct Gazebo foot contact listening in [FL, FR, RL, RR] order." << std::endl;
+    }
+    else
+    {
+        std::cout << LOGGER::WARNING << "gazebo_foot_contact_topics must contain 4 topics; direct contact input disabled." << std::endl;
+    }
 
     // service
     this->gazebo_pause_physics_client = ros2_node->create_client<std_srvs::srv::Empty>("/pause_physics");
@@ -130,8 +207,55 @@ RL_Sim::RL_Sim(int argc, char **argv)
     std::cout << LOGGER::INFO << "RL_Sim start" << std::endl;
 }
 
+void RL_Sim::LoadRecoveryPolicy()
+{
+    this->fault_switch_enabled = this->params.Get<bool>("fault_policy_switch_enabled", false);
+    if (!this->fault_switch_enabled)
+    {
+        return;
+    }
+
+    this->recovery_policy_name = this->params.Get<std::string>("recovery_policy_config_name", "");
+    if (this->recovery_policy_name.empty())
+    {
+        std::cout << LOGGER::WARNING << "Fault policy switch enabled, but recovery_policy_config_name is empty" << std::endl;
+        this->fault_switch_enabled = false;
+        return;
+    }
+
+    std::string recovery_model_name = this->params.Get<std::string>("recovery_model_name", "policy.pt");
+    const std::string recovery_config_path =
+        std::string(POLICY_DIR) + "/" + this->robot_name + "/" + this->recovery_policy_name + "/config.yaml";
+    try
+    {
+        YAML::Node recovery_config = YAML::LoadFile(recovery_config_path);
+        const std::string recovery_config_key = this->robot_name + "/" + this->recovery_policy_name;
+        if (recovery_config[recovery_config_key] && recovery_config[recovery_config_key]["model_name"])
+        {
+            recovery_model_name = recovery_config[recovery_config_key]["model_name"].as<std::string>();
+        }
+    }
+    catch (const YAML::Exception&)
+    {
+        std::cout << LOGGER::WARNING << "Could not read recovery config; using model name " << recovery_model_name << std::endl;
+    }
+
+    const std::string recovery_model_path =
+        std::string(POLICY_DIR) + "/" + this->robot_name + "/" + this->recovery_policy_name + "/" + recovery_model_name;
+    this->recovery_model = InferenceRuntime::ModelFactory::load_model(recovery_model_path);
+    if (!this->recovery_model)
+    {
+        std::cout << LOGGER::ERROR << "Failed to load recovery policy from: " << recovery_model_path << std::endl;
+        this->fault_switch_enabled = false;
+        return;
+    }
+
+    std::cout << LOGGER::INFO << "Recovery policy loaded: " << this->recovery_policy_name << std::endl;
+}
+
 RL_Sim::~RL_Sim()
 {
+    this->ClosePolicyDebugCsv();
     this->loop_keyboard->shutdown();
     this->loop_control->shutdown();
     this->loop_rl->shutdown();
@@ -278,11 +402,230 @@ void RL_Sim::ModelStatesCallback(const gazebo_msgs::msg::ModelStates::SharedPtr 
     }
 }
 
+void RL_Sim::LinkStatesCallback(const gazebo_msgs::msg::LinkStates::SharedPtr msg)
+{
+    const auto now = this->ros2_node->now();
+    if (this->last_foot_contacts_topic_time.nanoseconds() > 0 &&
+        (now - this->last_foot_contacts_topic_time).seconds() < 0.25)
+    {
+        return;
+    }
+
+    const float height_threshold = this->params.Get<float>("foot_contact_height_threshold", 0.08f);
+    const std::vector<std::string> default_foot_links = {
+        this->gazebo_model_name + "::FL_foot",
+        this->gazebo_model_name + "::FR_foot",
+        this->gazebo_model_name + "::RL_foot",
+        this->gazebo_model_name + "::RR_foot"
+    };
+    const auto foot_links = this->params.Get<std::vector<std::string>>("foot_contact_link_names", default_foot_links);
+    if (foot_links.size() != 4)
+    {
+        return;
+    }
+
+    std::vector<float> contacts(4, 0.0f);
+    for (size_t foot_id = 0; foot_id < foot_links.size(); ++foot_id)
+    {
+        const std::string short_name = foot_links[foot_id].substr(foot_links[foot_id].find_last_of(':') + 1);
+        for (size_t i = 0; i < msg->name.size() && i < msg->pose.size(); ++i)
+        {
+            if (msg->name[i] == foot_links[foot_id] || msg->name[i] == short_name ||
+                (msg->name[i].size() > short_name.size() &&
+                 msg->name[i].compare(msg->name[i].size() - short_name.size(), short_name.size(), short_name) == 0))
+            {
+                contacts[foot_id] = msg->pose[i].position.z <= height_threshold ? 1.0f : 0.0f;
+                break;
+            }
+        }
+    }
+    this->obs.foot_contacts = contacts;
+}
+
 void RL_Sim::CmdvelCallback(
     const geometry_msgs::msg::Twist::SharedPtr msg
 )
 {
     this->cmd_vel = *msg;
+}
+
+void RL_Sim::FaultAlphaCallback(const std_msgs::msg::Float32MultiArray::SharedPtr msg)
+{
+    const float threshold = this->params.Get<float>("fault_alpha_threshold", 0.999f);
+    bool detected = false;
+    std::ostringstream broken_joints;
+    const auto joint_names = this->params.Get<std::vector<std::string>>("joint_names");
+
+    for (size_t i = 0; i < msg->data.size(); ++i)
+    {
+        if (msg->data[i] < threshold)
+        {
+            if (detected)
+            {
+                broken_joints << ", ";
+            }
+            if (i < joint_names.size())
+            {
+                broken_joints << joint_names[i];
+            }
+            else
+            {
+                broken_joints << "joint_" << i;
+            }
+            broken_joints << "=" << msg->data[i];
+            detected = true;
+        }
+    }
+
+    bool previous_detected = false;
+    {
+        std::lock_guard<std::mutex> lock(this->fault_mutex);
+        previous_detected = this->fault_detected;
+        this->fault_detected = detected;
+        this->latest_fault_alpha.assign(msg->data.begin(), msg->data.end());
+    }
+
+    if (detected && !previous_detected)
+    {
+        RCLCPP_WARN(
+            this->ros2_node->get_logger(),
+            "Fault detected: %s. Zeroing command and blending to recovery policy '%s'.",
+            broken_joints.str().c_str(),
+            this->recovery_policy_name.c_str()
+        );
+    }
+    else if (!detected && previous_detected)
+    {
+        RCLCPP_INFO(this->ros2_node->get_logger(), "Fault cleared. Blending back to normal policy.");
+    }
+}
+
+void RL_Sim::GainAlphaCallback(const std_msgs::msg::Float32MultiArray::SharedPtr msg)
+{
+    const int num_dofs = this->params.Get<int>("num_of_dofs");
+    if (static_cast<int>(msg->data.size()) != num_dofs)
+    {
+        RCLCPP_ERROR_THROTTLE(
+            this->ros2_node->get_logger(),
+            *this->ros2_node->get_clock(),
+            2000,
+            "Ignoring gain alpha message with %zu entries; expected %d.",
+            msg->data.size(),
+            num_dofs
+        );
+        return;
+    }
+
+    std::vector<float> controller_alpha(num_dofs, 1.0f);
+    std::ostringstream damaged_joints;
+    bool has_damage = false;
+    const auto joint_names = this->params.Get<std::vector<std::string>>("joint_names");
+
+    for (int i = 0; i < num_dofs; ++i)
+    {
+        controller_alpha[i] = std::clamp(msg->data[i], 0.0f, 1.0f);
+        if (controller_alpha[i] < 0.999f)
+        {
+            if (has_damage)
+            {
+                damaged_joints << ", ";
+            }
+            damaged_joints << ((i < static_cast<int>(joint_names.size())) ? joint_names[i] : ("joint_" + std::to_string(i)));
+            damaged_joints << "=" << controller_alpha[i];
+            has_damage = true;
+        }
+    }
+
+    const auto joint_mapping = this->params.Get<std::vector<int>>("joint_mapping");
+    std::vector<float> policy_alpha(num_dofs, 1.0f);
+    for (int policy_index = 0; policy_index < num_dofs; ++policy_index)
+    {
+        if (policy_index < static_cast<int>(joint_mapping.size()) &&
+            joint_mapping[policy_index] >= 0 &&
+            joint_mapping[policy_index] < num_dofs)
+        {
+            policy_alpha[policy_index] = controller_alpha[joint_mapping[policy_index]];
+        }
+    }
+
+    this->SetGainAlpha(policy_alpha);
+
+    if (has_damage)
+    {
+        RCLCPP_WARN_THROTTLE(
+            this->ros2_node->get_logger(),
+            *this->ros2_node->get_clock(),
+            2000,
+            "Applying RL gain damage: %s. Effective gains are rl_kp*alpha and rl_kd*alpha.",
+            damaged_joints.str().c_str()
+        );
+    }
+    else
+    {
+        RCLCPP_INFO_THROTTLE(
+            this->ros2_node->get_logger(),
+            *this->ros2_node->get_clock(),
+            2000,
+            "RL gains restored to healthy alpha=1.0."
+        );
+    }
+}
+
+void RL_Sim::FootContactsCallback(const std_msgs::msg::Float32MultiArray::SharedPtr msg)
+{
+    if (msg->data.size() != 4)
+    {
+        RCLCPP_ERROR_THROTTLE(
+            this->ros2_node->get_logger(),
+            *this->ros2_node->get_clock(),
+            2000,
+            "Ignoring foot contact message with %zu entries; expected 4.",
+            msg->data.size()
+        );
+        return;
+    }
+
+    for (size_t i = 0; i < 4; ++i)
+    {
+        this->obs.foot_contacts[i] = msg->data[i] > 0.5f ? 1.0f : 0.0f;
+    }
+    this->last_foot_contacts_topic_time = this->ros2_node->now();
+}
+
+void RL_Sim::GazeboFootContactCallback(size_t foot_id, const gazebo_msgs::msg::ContactsState::SharedPtr msg)
+{
+    if (foot_id >= this->obs.foot_contacts.size())
+    {
+        return;
+    }
+
+    float total_fx = 0.0f;
+    float total_fy = 0.0f;
+    float total_fz = 0.0f;
+    for (const auto& state : msg->states)
+    {
+        const auto& force = state.total_wrench.force;
+        if (std::abs(force.x) > 1.0e-6 || std::abs(force.y) > 1.0e-6 || std::abs(force.z) > 1.0e-6)
+        {
+            total_fx += static_cast<float>(force.x);
+            total_fy += static_cast<float>(force.y);
+            total_fz += static_cast<float>(force.z);
+        }
+        else
+        {
+            for (const auto& wrench : state.wrenches)
+            {
+                total_fx += static_cast<float>(wrench.force.x);
+                total_fy += static_cast<float>(wrench.force.y);
+                total_fz += static_cast<float>(wrench.force.z);
+            }
+        }
+    }
+
+    const float force_norm = std::sqrt(total_fx * total_fx + total_fy * total_fy + total_fz * total_fz);
+    const float threshold = this->params.Get<float>("foot_contact_force_threshold", 1.0f);
+    this->obs.foot_contacts[foot_id] = force_norm > threshold ? 1.0f : 0.0f;
+    this->last_foot_contacts_topic_time = this->ros2_node->now();
 }
 
 void RL_Sim::JoyCallback(
@@ -345,6 +688,8 @@ void RL_Sim::RunModel()
     if (this->rl_init_done && simulation_running)
     {
         this->episode_length_buf += 1;
+        this->UpdateFaultBlend();
+
         this->obs.ang_vel = this->robot_state.imu.gyroscope;
         std::vector<float> lin_vel_world = {
             static_cast<float>(this->vel.linear.x),
@@ -357,12 +702,22 @@ void RL_Sim::RunModel()
         {
             this->obs.commands = {(float)this->cmd_vel.linear.x, (float)this->cmd_vel.linear.y, (float)this->cmd_vel.angular.z};
         }
+        bool active_fault = false;
+        {
+            std::lock_guard<std::mutex> lock(this->fault_mutex);
+            active_fault = this->fault_detected;
+        }
+        if (this->fault_switch_enabled && this->params.Get<bool>("zero_command_after_fault", true) && (active_fault || this->fault_blend > 0.0f))
+        {
+            this->obs.commands = {0.0f, 0.0f, 0.0f};
+        }
         this->obs.base_quat = this->robot_state.imu.quaternion;
         this->obs.dof_pos = this->robot_state.motor_state.q;
         this->obs.dof_vel = this->robot_state.motor_state.dq;
 
         this->obs.actions = this->Forward();
         this->ComputeOutput(this->obs.actions, this->output_dof_pos, this->output_dof_vel, this->output_dof_tau);
+        this->WritePolicyDebugCsv();
 
         if (!this->output_dof_pos.empty())
         {
@@ -391,6 +746,171 @@ void RL_Sim::RunModel()
     }
 }
 
+void RL_Sim::InitPolicyDebugCsv()
+{
+    this->policy_debug_csv_enabled = this->params.Get<bool>("policy_debug_csv_enabled", false);
+    this->policy_debug_csv_stride = std::max(1, this->params.Get<int>("policy_debug_csv_stride", 1));
+    this->policy_debug_csv_counter = 0;
+    this->policy_debug_csv_initialized = true;
+
+    if (!this->policy_debug_csv_enabled)
+    {
+        return;
+    }
+
+    std::string csv_path = this->params.Get<std::string>("policy_debug_csv_path", "");
+    if (csv_path.empty())
+    {
+        const auto now = std::chrono::system_clock::now();
+        const std::time_t now_time = std::chrono::system_clock::to_time_t(now);
+        std::tm now_tm = *std::localtime(&now_time);
+        std::ostringstream timestamp;
+        timestamp << std::put_time(&now_tm, "%Y%m%d_%H%M%S");
+
+        const std::filesystem::path debug_dir = std::filesystem::path(POLICY_DIR).parent_path() / "debug_logs";
+        std::filesystem::create_directories(debug_dir);
+        csv_path = (debug_dir / ("policy_debug_" + this->config_name + "_" + timestamp.str() + ".csv")).string();
+    }
+    else
+    {
+        const auto parent_path = std::filesystem::path(csv_path).parent_path();
+        if (!parent_path.empty())
+        {
+            std::filesystem::create_directories(parent_path);
+        }
+    }
+
+    this->policy_debug_csv_file.open(csv_path);
+    if (!this->policy_debug_csv_file.is_open())
+    {
+        std::cout << LOGGER::ERROR << "Could not open policy debug CSV: " << csv_path << std::endl;
+        this->policy_debug_csv_enabled = false;
+        return;
+    }
+
+    this->policy_debug_csv_file
+        << "episode_step,ros_time_s,cmd_x,cmd_y,cmd_yaw,"
+        << "lin_vel_x,lin_vel_y,lin_vel_z,ang_vel_x,ang_vel_y,ang_vel_z,"
+        << "foot_FL,foot_FR,foot_RL,foot_RR";
+
+    const auto controller_joint_names = this->params.Get<std::vector<std::string>>("joint_names");
+    const auto joint_mapping = this->params.Get<std::vector<int>>("joint_mapping");
+    for (int i = 0; i < this->params.Get<int>("num_of_dofs"); ++i)
+    {
+        std::string joint_name = "joint_" + std::to_string(i);
+        if (i < static_cast<int>(joint_mapping.size()) &&
+            joint_mapping[i] >= 0 &&
+            joint_mapping[i] < static_cast<int>(controller_joint_names.size()))
+        {
+            joint_name = controller_joint_names[joint_mapping[i]];
+        }
+        this->policy_debug_csv_file
+            << ",action_" << joint_name
+            << ",target_q_" << joint_name
+            << ",actual_q_" << joint_name
+            << ",error_q_" << joint_name
+            << ",actual_dq_" << joint_name
+            << ",target_tau_" << joint_name;
+    }
+    this->policy_debug_csv_file << "\n";
+    this->policy_debug_csv_file.flush();
+
+    std::cout << LOGGER::INFO << "Policy debug CSV logging to: " << csv_path << std::endl;
+}
+
+void RL_Sim::WritePolicyDebugCsv()
+{
+    if (!this->policy_debug_csv_initialized)
+    {
+        this->InitPolicyDebugCsv();
+    }
+    if (!this->policy_debug_csv_enabled || !this->policy_debug_csv_file.is_open())
+    {
+        return;
+    }
+    if ((this->policy_debug_csv_counter++ % this->policy_debug_csv_stride) != 0)
+    {
+        return;
+    }
+
+    this->policy_debug_csv_file
+        << this->episode_length_buf << ","
+        << this->ros2_node->now().seconds() << ","
+        << this->obs.commands[0] << ","
+        << this->obs.commands[1] << ","
+        << this->obs.commands[2] << ","
+        << this->obs.lin_vel[0] << ","
+        << this->obs.lin_vel[1] << ","
+        << this->obs.lin_vel[2] << ","
+        << this->obs.ang_vel[0] << ","
+        << this->obs.ang_vel[1] << ","
+        << this->obs.ang_vel[2] << ","
+        << this->obs.foot_contacts[0] << ","
+        << this->obs.foot_contacts[1] << ","
+        << this->obs.foot_contacts[2] << ","
+        << this->obs.foot_contacts[3];
+
+    const int num_dofs = this->params.Get<int>("num_of_dofs");
+    for (int i = 0; i < num_dofs; ++i)
+    {
+        const float action = i < static_cast<int>(this->obs.actions.size()) ? this->obs.actions[i] : 0.0f;
+        const float target_q = i < static_cast<int>(this->output_dof_pos.size()) ? this->output_dof_pos[i] : 0.0f;
+        const float actual_q = i < static_cast<int>(this->obs.dof_pos.size()) ? this->obs.dof_pos[i] : 0.0f;
+        const float actual_dq = i < static_cast<int>(this->obs.dof_vel.size()) ? this->obs.dof_vel[i] : 0.0f;
+        const float target_tau = i < static_cast<int>(this->output_dof_tau.size()) ? this->output_dof_tau[i] : 0.0f;
+        this->policy_debug_csv_file
+            << "," << action
+            << "," << target_q
+            << "," << actual_q
+            << "," << (target_q - actual_q)
+            << "," << actual_dq
+            << "," << target_tau;
+    }
+    this->policy_debug_csv_file << "\n";
+
+    if ((this->policy_debug_csv_counter % 25) == 0)
+    {
+        this->policy_debug_csv_file.flush();
+    }
+}
+
+void RL_Sim::ClosePolicyDebugCsv()
+{
+    if (this->policy_debug_csv_file.is_open())
+    {
+        this->policy_debug_csv_file.flush();
+        this->policy_debug_csv_file.close();
+    }
+}
+
+void RL_Sim::UpdateFaultBlend()
+{
+    if (!this->fault_switch_enabled || !this->recovery_model)
+    {
+        this->fault_blend = 0.0f;
+        return;
+    }
+
+    bool active_fault = false;
+    {
+        std::lock_guard<std::mutex> lock(this->fault_mutex);
+        active_fault = this->fault_detected;
+    }
+
+    const float dt = this->params.Get<float>("dt", 0.005f) * static_cast<float>(this->params.Get<int>("decimation", 4));
+    const float blend_time = std::max(0.001f, this->params.Get<float>("fault_recovery_blend_time", 1.0f));
+    const float blend_step = dt / blend_time;
+
+    if (active_fault)
+    {
+        this->fault_blend = std::min(1.0f, this->fault_blend + blend_step);
+    }
+    else
+    {
+        this->fault_blend = std::max(0.0f, this->fault_blend - blend_step);
+    }
+}
+
 std::vector<float> RL_Sim::Forward()
 {
     std::unique_lock<std::mutex> lock(this->model_mutex, std::try_to_lock);
@@ -404,16 +924,56 @@ std::vector<float> RL_Sim::Forward()
 
     std::vector<float> clamped_obs = this->ComputeObservation();
 
-    std::vector<float> actions;
-    if (this->params.Get<std::vector<int>>("observations_history").size() != 0)
+    const std::string model_forward_mode = this->params.Get<std::string>("model_forward_mode", "single");
+    std::vector<std::vector<float>> model_input;
+    std::vector<std::vector<int64_t>> model_input_shapes;
+    if (model_forward_mode == "obs_history")
+    {
+        const auto observations_history = this->params.Get<std::vector<int>>("observations_history");
+        if (observations_history.empty())
+        {
+            throw std::runtime_error("model_forward_mode=obs_history requires observations_history");
+        }
+        if (this->params.Get<bool>("warm_start_history", false) && this->episode_length_buf <= 1)
+        {
+            this->history_obs_buf.reset({0}, clamped_obs);
+        }
+        this->history_obs_buf.insert(clamped_obs);
+        this->history_obs = this->history_obs_buf.get_obs_vec(observations_history);
+
+        const int64_t obs_dim = static_cast<int64_t>(this->params.Get<int>("num_observations", static_cast<int>(clamped_obs.size())));
+        const int64_t history_length = static_cast<int64_t>(this->params.Get<int>("history_length", static_cast<int>(observations_history.size())));
+        model_input = {clamped_obs, this->history_obs};
+        model_input_shapes = {{1, obs_dim}, {1, history_length, obs_dim}};
+    }
+    else if (this->params.Get<std::vector<int>>("observations_history").size() != 0)
     {
         this->history_obs_buf.insert(clamped_obs);
         this->history_obs = this->history_obs_buf.get_obs_vec(this->params.Get<std::vector<int>>("observations_history"));
-        actions = this->model->forward({this->history_obs});
+        model_input = {this->history_obs};
+        model_input_shapes = {{1, static_cast<int64_t>(this->history_obs.size())}};
     }
     else
     {
-        actions = this->model->forward({clamped_obs});
+        model_input = {clamped_obs};
+        model_input_shapes = {{1, static_cast<int64_t>(clamped_obs.size())}};
+    }
+
+    std::vector<float> actions = this->model->forward_with_shapes(model_input, model_input_shapes);
+    if (model_forward_mode != "obs_history" && this->fault_switch_enabled && this->recovery_model && this->fault_blend > 0.0f)
+    {
+        std::vector<float> recovery_actions = this->recovery_model->forward_with_shapes(model_input, model_input_shapes);
+        if (recovery_actions.size() == actions.size())
+        {
+            for (size_t i = 0; i < actions.size(); ++i)
+            {
+                actions[i] = (1.0f - this->fault_blend) * actions[i] + this->fault_blend * recovery_actions[i];
+            }
+        }
+        else
+        {
+            std::cout << LOGGER::WARNING << "Recovery policy action size mismatch; using normal policy action" << std::endl;
+        }
     }
 
     if (!this->params.Get<std::vector<float>>("clip_actions_upper").empty() && !this->params.Get<std::vector<float>>("clip_actions_lower").empty())

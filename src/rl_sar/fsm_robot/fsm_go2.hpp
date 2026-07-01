@@ -8,6 +8,7 @@
 
 #include "fsm.hpp"
 #include "rl_sdk.hpp"
+#include <cstdlib>
 
 namespace go2_fsm
 {
@@ -166,7 +167,10 @@ public:
         const RobotState<float> previous_state = *fsm_state;
 
         // read params from yaml
-        rl.config_name = "isaaclab48";
+        const char* policy_config_override = std::getenv("RL_SAR_POLICY_CONFIG_NAME");
+        rl.config_name = (policy_config_override && std::string(policy_config_override).size() > 0)
+            ? std::string(policy_config_override)
+            : rl.params.Get<std::string>("policy_config_name", "isaaclab48");
         std::string robot_config_path = rl.robot_name + "/" + rl.config_name;
         try
         {
@@ -221,42 +225,51 @@ public:
 
     void Run() override
     {
-        // position transition from last default_dof_pos to current default_dof_pos
-        if (Interpolate(percent_transition, rl.now_state.motor_state.q, rl.params.Get<std::vector<float>>("default_dof_pos"), 1.5f, "Policy transition", true)) return;
-
-        const float stand_command_threshold = rl.params.Get<float>("stand_command_threshold", 0.02f);
-        const bool zero_command =
-            std::abs(rl.control.x) < stand_command_threshold &&
-            std::abs(rl.control.y) < stand_command_threshold &&
-            std::abs(rl.control.yaw) < stand_command_threshold;
-        if (rl.params.Get<bool>("hold_zero_command", false) && zero_command)
+        try
         {
-            rl.rl_init_done = false;
-            std::vector<float> stale_output;
-            while (rl.output_dof_pos_queue.try_pop(stale_output)) {}
-            while (rl.output_dof_vel_queue.try_pop(stale_output)) {}
-            while (rl.output_dof_tau_queue.try_pop(stale_output)) {}
+            // position transition from last default_dof_pos to current default_dof_pos
+            if (Interpolate(percent_transition, rl.now_state.motor_state.q, rl.params.Get<std::vector<float>>("default_dof_pos"), 1.5f, "Policy transition", true)) return;
 
-            const auto default_dof_pos = rl.params.Get<std::vector<float>>("default_dof_pos");
-            const auto kp = rl.params.Get<std::vector<float>>("rl_kp");
-            const auto kd = rl.params.Get<std::vector<float>>("rl_kd");
-            for (int i = 0; i < rl.params.Get<int>("num_of_dofs"); ++i)
+            const float stand_command_threshold = rl.params.Get<float>("stand_command_threshold", 0.02f);
+            const bool zero_command =
+                std::abs(rl.control.x) < stand_command_threshold &&
+                std::abs(rl.control.y) < stand_command_threshold &&
+                std::abs(rl.control.yaw) < stand_command_threshold;
+            if (rl.params.Get<bool>("hold_zero_command", false) && zero_command)
             {
-                fsm_command->motor_command.q[i] = default_dof_pos[i];
-                fsm_command->motor_command.dq[i] = 0;
-                fsm_command->motor_command.kp[i] = kp[i];
-                fsm_command->motor_command.kd[i] = kd[i];
-                fsm_command->motor_command.tau[i] = 0;
+                rl.rl_init_done = false;
+                std::vector<float> stale_output;
+                while (rl.output_dof_pos_queue.try_pop(stale_output)) {}
+                while (rl.output_dof_vel_queue.try_pop(stale_output)) {}
+                while (rl.output_dof_tau_queue.try_pop(stale_output)) {}
+
+                const auto default_dof_pos = rl.params.Get<std::vector<float>>("default_dof_pos");
+                const auto kp = rl.params.Get<std::vector<float>>("rl_kp");
+                const auto kd = rl.params.Get<std::vector<float>>("rl_kd");
+                for (int i = 0; i < rl.params.Get<int>("num_of_dofs"); ++i)
+                {
+                    fsm_command->motor_command.q[i] = default_dof_pos[i];
+                    fsm_command->motor_command.dq[i] = 0;
+                    fsm_command->motor_command.kp[i] = kp[i];
+                    fsm_command->motor_command.kd[i] = kd[i];
+                    fsm_command->motor_command.tau[i] = 0;
+                }
+
+                std::cout << "\r\033[K" << std::flush << LOGGER::INFO << "RL Controller [" << rl.config_name << "] holding default pose" << std::flush;
+                return;
             }
 
-            std::cout << "\r\033[K" << std::flush << LOGGER::INFO << "RL Controller [" << rl.config_name << "] holding default pose" << std::flush;
-            return;
+            if (!rl.rl_init_done) rl.rl_init_done = true;
+
+            std::cout << "\r\033[K" << std::flush << LOGGER::INFO << "RL Controller [" << rl.config_name << "] x:" << rl.control.x << " y:" << rl.control.y << " yaw:" << rl.control.yaw << std::flush;
+            RLControl();
         }
-
-        if (!rl.rl_init_done) rl.rl_init_done = true;
-
-        std::cout << "\r\033[K" << std::flush << LOGGER::INFO << "RL Controller [" << rl.config_name << "] x:" << rl.control.x << " y:" << rl.control.y << " yaw:" << rl.control.yaw << std::flush;
-        RLControl();
+        catch (const std::exception& e)
+        {
+            std::cout << std::endl << LOGGER::ERROR << "RLLocomotion failed: " << e.what() << std::endl;
+            rl.rl_init_done = false;
+            rl.fsm.RequestStateChange("RLFSMStatePassive");
+        }
     }
 
     void Exit() override

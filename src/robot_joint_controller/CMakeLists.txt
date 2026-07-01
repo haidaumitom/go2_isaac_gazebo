@@ -18,6 +18,7 @@ project(robot_joint_controller VERSION 3.0.0 LANGUAGES CXX)
     find_package(controller_interface REQUIRED)
     find_package(pluginlib REQUIRED)
     find_package(robot_msgs REQUIRED)
+    find_package(std_msgs REQUIRED)
     find_package(geometry_msgs REQUIRED)
     find_package(rcl_interfaces REQUIRED)
 
@@ -39,6 +40,7 @@ project(robot_joint_controller VERSION 3.0.0 LANGUAGES CXX)
         controller_interface
         pluginlib
         robot_msgs
+        std_msgs
         geometry_msgs
         rcl_interfaces
     )
@@ -59,6 +61,7 @@ project(robot_joint_controller VERSION 3.0.0 LANGUAGES CXX)
         controller_interface
         pluginlib
         robot_msgs
+        std_msgs
         geometry_msgs
         rcl_interfaces
     )

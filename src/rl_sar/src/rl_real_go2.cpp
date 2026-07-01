@@ -94,6 +94,7 @@ RL_Real::~RL_Real()
     this->loop_keyboard->shutdown();
     this->loop_control->shutdown();
     this->loop_rl->shutdown();
+    this->ClosePolicyDebugCsv();
 #ifdef PLOT
     this->loop_plot->shutdown();
 #endif
@@ -186,11 +187,8 @@ void RL_Real::SetCommand(const RobotCommand<float> *command)
     }
 
     dds_low_command.crc() = Crc32Core((uint32_t *)&dds_low_command, (sizeof(unitree_go::msg::dds_::LowCmd_) >> 2) - 1);
-    lowcmd_publisher->Write(dds_low_command);
-
-#ifdef PLOT
     this->unitree_low_command = dds_low_command;
-#endif
+    lowcmd_publisher->Write(this->unitree_low_command);
 }
 
 void RL_Real::RobotControl()
@@ -202,6 +200,8 @@ void RL_Real::RobotControl()
     this->control.ClearInput();
 
     this->SetCommand(&this->robot_command);
+
+    this->WritePolicyDebugCsv();
 }
 
 void RL_Real::RunModel()
@@ -245,6 +245,227 @@ void RL_Real::RunModel()
         std::vector<float> tau_est = this->robot_state.motor_state.tau_est;
         this->CSVLogger(this->output_dof_tau, tau_est, this->obs.dof_pos, this->output_dof_pos, this->obs.dof_vel);
 #endif
+    }
+}
+
+void RL_Real::InitPolicyDebugCsv()
+{
+    this->policy_debug_csv_enabled = this->params.Get<bool>("policy_debug_csv_enabled", false);
+    this->policy_debug_csv_stride = std::max(1, this->params.Get<int>("policy_debug_csv_stride", 1));
+    this->policy_debug_csv_counter = 0;
+    this->policy_debug_csv_initialized = true;
+
+    if (!this->policy_debug_csv_enabled)
+    {
+        return;
+    }
+
+    std::string csv_path = this->params.Get<std::string>("policy_debug_csv_path", "");
+    if (csv_path.empty())
+    {
+        const auto now = std::chrono::system_clock::now();
+        const std::time_t now_time = std::chrono::system_clock::to_time_t(now);
+        std::tm now_tm = *std::localtime(&now_time);
+        std::ostringstream timestamp;
+        timestamp << std::put_time(&now_tm, "%Y%m%d_%H%M%S");
+
+        const std::string active_config_name = this->config_name.empty() ? "unknown" : this->config_name;
+        const std::filesystem::path debug_dir = std::filesystem::path(POLICY_DIR).parent_path() / "debug_logs";
+        std::filesystem::create_directories(debug_dir);
+        csv_path = (debug_dir / ("real_policy_debug_" + active_config_name + "_" + timestamp.str() + ".csv")).string();
+    }
+    else
+    {
+        const auto parent_path = std::filesystem::path(csv_path).parent_path();
+        if (!parent_path.empty())
+        {
+            std::filesystem::create_directories(parent_path);
+        }
+    }
+
+    this->policy_debug_csv_file.open(csv_path);
+    if (!this->policy_debug_csv_file.is_open())
+    {
+        std::cout << LOGGER::ERROR << "Could not open real policy debug CSV: " << csv_path << std::endl;
+        this->policy_debug_csv_enabled = false;
+        return;
+    }
+
+    this->policy_debug_csv_file << std::fixed << std::setprecision(6);
+    this->policy_debug_csv_file
+        << "episode_step,wall_time_s,lowstate_tick,"
+        << "control_x,control_y,control_yaw,"
+        << "obs_cmd_x,obs_cmd_y,obs_cmd_yaw,"
+        << "lin_vel_x,lin_vel_y,lin_vel_z,"
+        << "ang_vel_x,ang_vel_y,ang_vel_z,"
+        << "gravity_body_x,gravity_body_y,gravity_body_z,"
+        << "base_quat_w,base_quat_x,base_quat_y,base_quat_z,"
+        << "joy_lx,joy_ly,joy_rx,joy_ry,joy_keys,"
+        << "foot_force_0,foot_force_1,foot_force_2,foot_force_3,"
+        << "foot_force_est_0,foot_force_est_1,foot_force_est_2,foot_force_est_3";
+
+    const auto joint_names = this->params.Get<std::vector<std::string>>("joint_names");
+    const auto joint_mapping = this->params.Get<std::vector<int>>("joint_mapping");
+    const int num_dofs = this->params.Get<int>("num_of_dofs");
+    for (int i = 0; i < num_dofs; ++i)
+    {
+        std::string joint_name = "joint_" + std::to_string(i);
+        if (i < static_cast<int>(joint_mapping.size()) &&
+            joint_mapping[i] >= 0 &&
+            joint_mapping[i] < static_cast<int>(joint_names.size()))
+        {
+            joint_name = joint_names[joint_mapping[i]];
+        }
+
+        this->policy_debug_csv_file
+            << ",action_" << joint_name
+            << ",target_q_" << joint_name
+            << ",target_dq_" << joint_name
+            << ",target_tau_" << joint_name
+            << ",actual_q_" << joint_name
+            << ",actual_dq_" << joint_name
+            << ",actual_tau_est_" << joint_name
+            << ",robot_cmd_q_" << joint_name
+            << ",robot_cmd_dq_" << joint_name
+            << ",robot_cmd_kp_" << joint_name
+            << ",robot_cmd_kd_" << joint_name
+            << ",robot_cmd_tau_" << joint_name
+            << ",lowcmd_q_" << joint_name
+            << ",lowcmd_dq_" << joint_name
+            << ",lowcmd_kp_" << joint_name
+            << ",lowcmd_kd_" << joint_name
+            << ",lowcmd_tau_" << joint_name;
+    }
+    this->policy_debug_csv_file << "\n";
+    this->policy_debug_csv_file.flush();
+
+    std::cout << LOGGER::INFO << "Real policy debug CSV logging to: " << csv_path << std::endl;
+}
+
+void RL_Real::WritePolicyDebugCsv()
+{
+    if (!this->params.Has("policy_debug_csv_enabled"))
+    {
+        return;
+    }
+    if (!this->policy_debug_csv_initialized)
+    {
+        this->InitPolicyDebugCsv();
+    }
+    if (!this->policy_debug_csv_enabled || !this->policy_debug_csv_file.is_open())
+    {
+        return;
+    }
+    if ((this->policy_debug_csv_counter++ % this->policy_debug_csv_stride) != 0)
+    {
+        return;
+    }
+
+    auto value_at = [](const std::vector<float>& values, int index) -> float
+    {
+        return (index >= 0 && index < static_cast<int>(values.size())) ? values[index] : 0.0f;
+    };
+
+    std::vector<float> gravity_body = {0.0f, 0.0f, 0.0f};
+    if (this->obs.base_quat.size() == 4 && this->obs.gravity_vec.size() == 3)
+    {
+        gravity_body = QuatRotateInverse(this->obs.base_quat, this->obs.gravity_vec);
+    }
+
+    const auto now = std::chrono::system_clock::now();
+    const double wall_time_s = std::chrono::duration<double>(now.time_since_epoch()).count();
+
+    this->policy_debug_csv_file
+        << this->episode_length_buf << ","
+        << wall_time_s << ","
+        << this->unitree_low_state.tick() << ","
+        << this->control.x << ","
+        << this->control.y << ","
+        << this->control.yaw << ","
+        << value_at(this->obs.commands, 0) << ","
+        << value_at(this->obs.commands, 1) << ","
+        << value_at(this->obs.commands, 2) << ","
+        << value_at(this->obs.lin_vel, 0) << ","
+        << value_at(this->obs.lin_vel, 1) << ","
+        << value_at(this->obs.lin_vel, 2) << ","
+        << value_at(this->obs.ang_vel, 0) << ","
+        << value_at(this->obs.ang_vel, 1) << ","
+        << value_at(this->obs.ang_vel, 2) << ","
+        << value_at(gravity_body, 0) << ","
+        << value_at(gravity_body, 1) << ","
+        << value_at(gravity_body, 2) << ","
+        << value_at(this->obs.base_quat, 0) << ","
+        << value_at(this->obs.base_quat, 1) << ","
+        << value_at(this->obs.base_quat, 2) << ","
+        << value_at(this->obs.base_quat, 3) << ","
+        << this->joystick.lx() << ","
+        << this->joystick.ly() << ","
+        << this->joystick.rx() << ","
+        << this->joystick.ry() << ","
+        << this->joystick.keys() << ","
+        << this->unitree_low_state.foot_force()[0] << ","
+        << this->unitree_low_state.foot_force()[1] << ","
+        << this->unitree_low_state.foot_force()[2] << ","
+        << this->unitree_low_state.foot_force()[3] << ","
+        << this->unitree_low_state.foot_force_est()[0] << ","
+        << this->unitree_low_state.foot_force_est()[1] << ","
+        << this->unitree_low_state.foot_force_est()[2] << ","
+        << this->unitree_low_state.foot_force_est()[3];
+
+    const auto joint_mapping = this->params.Get<std::vector<int>>("joint_mapping");
+    const int num_dofs = this->params.Get<int>("num_of_dofs");
+    for (int i = 0; i < num_dofs; ++i)
+    {
+        const int lowcmd_index = (i < static_cast<int>(joint_mapping.size())) ? joint_mapping[i] : i;
+        const bool valid_lowcmd_index = lowcmd_index >= 0 && lowcmd_index < static_cast<int>(this->unitree_low_command.motor_cmd().size());
+        const auto& motor_cmd = valid_lowcmd_index ? this->unitree_low_command.motor_cmd()[lowcmd_index] : this->unitree_low_command.motor_cmd()[0];
+
+        const float action = value_at(this->obs.actions, i);
+        const float target_q = value_at(this->output_dof_pos, i);
+        const float target_dq = value_at(this->output_dof_vel, i);
+        const float target_tau = value_at(this->output_dof_tau, i);
+        const float actual_q = value_at(this->robot_state.motor_state.q, i);
+        const float actual_dq = value_at(this->robot_state.motor_state.dq, i);
+        const float actual_tau_est = value_at(this->robot_state.motor_state.tau_est, i);
+        const float robot_cmd_q = value_at(this->robot_command.motor_command.q, i);
+        const float robot_cmd_dq = value_at(this->robot_command.motor_command.dq, i);
+        const float robot_cmd_kp = value_at(this->robot_command.motor_command.kp, i);
+        const float robot_cmd_kd = value_at(this->robot_command.motor_command.kd, i);
+        const float robot_cmd_tau = value_at(this->robot_command.motor_command.tau, i);
+
+        this->policy_debug_csv_file
+            << "," << action
+            << "," << target_q
+            << "," << target_dq
+            << "," << target_tau
+            << "," << actual_q
+            << "," << actual_dq
+            << "," << actual_tau_est
+            << "," << robot_cmd_q
+            << "," << robot_cmd_dq
+            << "," << robot_cmd_kp
+            << "," << robot_cmd_kd
+            << "," << robot_cmd_tau
+            << "," << motor_cmd.q()
+            << "," << motor_cmd.dq()
+            << "," << motor_cmd.kp()
+            << "," << motor_cmd.kd()
+            << "," << motor_cmd.tau();
+    }
+    this->policy_debug_csv_file << "\n";
+
+    if ((this->policy_debug_csv_counter % 25) == 0)
+    {
+        this->policy_debug_csv_file.flush();
+    }
+}
+
+void RL_Real::ClosePolicyDebugCsv()
+{
+    if (this->policy_debug_csv_file.is_open())
+    {
+        this->policy_debug_csv_file.flush();
+        this->policy_debug_csv_file.close();
     }
 }
 

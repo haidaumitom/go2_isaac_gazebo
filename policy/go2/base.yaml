@@ -1,4 +1,13 @@
 go2:
+  policy_config_name: "isaaclab48"
+  recovery_policy_config_name: "fault_adaptive_180800"
+  fault_policy_switch_enabled: true
+  fault_alpha_topic: "/robot_joint_controller/fault_alpha"
+  gain_alpha_topic: "/rl_sar/gain_alpha"
+  foot_contacts_topic: "/rl_sar/foot_contacts"
+  fault_alpha_threshold: 0.999
+  fault_recovery_blend_time: 1.0
+  zero_command_after_fault: true
   dt: 0.005
   decimation: 4
   fixed_kp: [80.0, 80.0, 80.0,
@@ -15,11 +24,10 @@ go2:
                   23.5, 23.5, 23.5,
                   23.5, 23.5, 23.5,
                   23.5, 23.5, 23.5]
-  default_dof_pos:
-  [-0.10, 0.80, -1.50,
-    0.10, 0.80, -1.50,
-   -0.10, 1.00, -1.50,
-    0.10, 1.00, -1.50]
+  default_dof_pos: [ 0.00, 0.80, -1.50,
+                     0.00, 0.80, -1.50,
+                     0.00, 0.80, -1.50,
+                     0.00, 0.80, -1.50]
   joint_names: ["FR_hip_joint", "FR_thigh_joint", "FR_calf_joint",
                 "FL_hip_joint", "FL_thigh_joint", "FL_calf_joint",
                 "RR_hip_joint", "RR_thigh_joint", "RR_calf_joint",

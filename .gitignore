@@ -14,9 +14,17 @@ Cargo.lock
 
 # Python
 __pycache__
+*.py[cod]
+.pytest_cache/
 
 # IDE
 .vscode
+.idea/
+.codex/
+.agents/
+*.db
+*.db-shm
+*.db-wal
 
 # OS
 .DS_Store
@@ -33,6 +41,9 @@ MUJOCO_LOG.TXT
 # Data
 .cache
 debug_logs/
+*.log
+*.bag
+*.mcap
 *.json
 
 # temp
