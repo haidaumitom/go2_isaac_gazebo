@@ -131,11 +131,11 @@ joint_pos_limit_lower / joint_pos_limit_upper
 hold_zero_command
 ```
 
-The current policies are:
+The policies are:
 
 ```text
 isaaclab45_real  flat IsaacLab policy with no base linear velocity observation
-rough45_9150     rough-terrain IsaacLab policy with 45 actor observations
+rough45     rough-terrain IsaacLab policy with 45 actor observations
 isaaclab48       older baseline policy with 48 observations
 ```
 
