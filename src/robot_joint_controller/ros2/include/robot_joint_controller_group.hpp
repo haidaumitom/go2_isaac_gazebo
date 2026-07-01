@@ -9,6 +9,7 @@
 #include "controller_interface/controller_interface.hpp"
 #include <std_msgs/msg/float64.hpp>
 #include <rcl_interfaces/srv/get_parameters.hpp>
+#include <std_msgs/msg/float32_multi_array.hpp>
 #include "robot_msgs/msg/robot_command.hpp"
 #include "robot_msgs/msg/robot_state.hpp"
 #include "visibility_control.h"
@@ -76,6 +77,7 @@ public:
 
     void UpdateFunc(const double &period_seconds);
     void SetCommandCallback(const robot_msgs::msg::RobotCommand::SharedPtr msg);
+    void SetFaultAlphaCallback(const std_msgs::msg::Float32MultiArray::SharedPtr msg);
     void PositionLimit(double &position, int &index);
     void VelocityLimit(double &velocity, int &index);
     void EffortLimit(double &effort, int &index);
@@ -84,12 +86,15 @@ protected:
     std::string name_space_;
     std::vector<std::string> joint_names_;
     realtime_tools::RealtimeBuffer<robot_msgs::msg::RobotCommand> rt_command_ptr_;
+    realtime_tools::RealtimeBuffer<std::vector<double>> rt_fault_alpha_ptr_;
     robot_msgs::msg::RobotCommand last_command_;
     robot_msgs::msg::RobotState last_state_;
+    std::vector<double> fault_alpha_;
     ServoCommand servo_command_;
     std::vector<urdf::JointConstSharedPtr> joints_urdf_;
     rclcpp::Client<rcl_interfaces::srv::GetParameters>::SharedPtr robot_description_client_;
     rclcpp::Subscription<robot_msgs::msg::RobotCommand>::SharedPtr joints_command_subscriber_;
+    rclcpp::Subscription<std_msgs::msg::Float32MultiArray>::SharedPtr fault_alpha_subscriber_;
     std::shared_ptr<realtime_tools::RealtimePublisher<robot_msgs::msg::RobotState>> controller_state_publisher_;
 #if defined(ROS_DISTRO_FOXY)
     rclcpp::Time previous_update_timestamp_{0};

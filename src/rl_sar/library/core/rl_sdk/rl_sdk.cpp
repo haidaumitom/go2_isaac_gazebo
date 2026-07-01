@@ -110,6 +110,10 @@ std::vector<float> RL::ComputeObservation()
         {
             obs_list.push_back(this->obs.actions);
         }
+        else if (observation == "foot_contacts")
+        {
+            obs_list.push_back(this->obs.foot_contacts);
+        }
         // ============= Other Observations =============
         else if (observation == "whole_body_tracking/motion_command")
         {
@@ -194,6 +198,7 @@ void RL::InitObservations()
     this->obs.dof_vel.resize(this->params.Get<int>("num_of_dofs"), 0.0f);
     this->obs.actions.clear();
     this->obs.actions.resize(this->params.Get<int>("num_of_dofs"), 0.0f);
+    this->obs.foot_contacts = {0.0f, 0.0f, 0.0f, 0.0f};
     this->ComputeObservation();
 }
 
@@ -220,6 +225,22 @@ void RL::InitJointNum(size_t num_joints)
     this->start_state.motor_state.resize(num_joints);
     this->now_state.motor_state.resize(num_joints);
     this->robot_command.motor_command.resize(num_joints);
+    {
+        std::lock_guard<std::mutex> lock(this->gain_fault_mutex);
+        this->gain_alpha.assign(num_joints, 1.0f);
+    }
+}
+
+void RL::SetGainAlpha(const std::vector<float> &alpha)
+{
+    std::lock_guard<std::mutex> lock(this->gain_fault_mutex);
+    this->gain_alpha = alpha;
+}
+
+std::vector<float> RL::GetGainAlpha()
+{
+    std::lock_guard<std::mutex> lock(this->gain_fault_mutex);
+    return this->gain_alpha;
 }
 
 void RL::InitRL(std::string robot_config_path)
@@ -274,7 +295,10 @@ void RL::ComputeOutput(const std::vector<float> &actions, std::vector<float> &ou
         all_actions_scaled = output_dof_pos - this->params.Get<std::vector<float>>("default_dof_pos") + vel_actions_scaled;
     }
     output_dof_vel = vel_actions_scaled;
-    output_dof_tau = this->params.Get<std::vector<float>>("rl_kp") * (all_actions_scaled + this->params.Get<std::vector<float>>("default_dof_pos") - this->obs.dof_pos) - this->params.Get<std::vector<float>>("rl_kd") * this->obs.dof_vel;
+    const auto gain_alpha = this->GetGainAlpha();
+    const auto rl_kp = this->params.Get<std::vector<float>>("rl_kp") * gain_alpha;
+    const auto rl_kd = this->params.Get<std::vector<float>>("rl_kd") * gain_alpha;
+    output_dof_tau = rl_kp * (all_actions_scaled + this->params.Get<std::vector<float>>("default_dof_pos") - this->obs.dof_pos) - rl_kd * this->obs.dof_vel;
     output_dof_tau = clamp(output_dof_tau, -this->params.Get<std::vector<float>>("torque_limits"), this->params.Get<std::vector<float>>("torque_limits"));
 }
 
@@ -599,6 +623,9 @@ void RLFSMState::RLControl()
     std::vector<float> _output_dof_pos, _output_dof_vel;
     if (rl.output_dof_pos_queue.try_pop(_output_dof_pos) && rl.output_dof_vel_queue.try_pop(_output_dof_vel))
     {
+        const auto rl_kp = rl.params.Get<std::vector<float>>("rl_kp");
+        const auto rl_kd = rl.params.Get<std::vector<float>>("rl_kd");
+        const auto gain_alpha = rl.GetGainAlpha();
         for (int i = 0; i < rl.params.Get<int>("num_of_dofs"); ++i)
         {
             if (!_output_dof_pos.empty())
@@ -609,8 +636,8 @@ void RLFSMState::RLControl()
             {
                 fsm_command->motor_command.dq[i] = _output_dof_vel[i];
             }
-            fsm_command->motor_command.kp[i] = rl.params.Get<std::vector<float>>("rl_kp")[i];
-            fsm_command->motor_command.kd[i] = rl.params.Get<std::vector<float>>("rl_kd")[i];
+            fsm_command->motor_command.kp[i] = rl_kp[i] * gain_alpha[i];
+            fsm_command->motor_command.kd[i] = rl_kd[i] * gain_alpha[i];
             fsm_command->motor_command.tau[i] = 0;
         }
     }

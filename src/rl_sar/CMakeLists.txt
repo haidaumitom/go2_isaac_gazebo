@@ -365,6 +365,9 @@ endif()
 if(NOT USE_CMAKE)
         install(PROGRAMS
             scripts/actuator_net.py
+            scripts/run_fault_scenario.py
+            scripts/run_foot_contact_bridge.py
+            scripts/run_gain_fault_scenario.py
             DESTINATION lib/${PROJECT_NAME}
         )
 endif()

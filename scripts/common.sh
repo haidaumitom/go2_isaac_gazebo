@@ -1,21 +1,10 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-# ========================
-# Common Shell Script Utilities
-# Shared functions for build and setup scripts
-# ========================
-
-# Color definitions
-COLOR_ERROR='\033[0;31m'     # Red
-COLOR_SUCCESS='\033[0;32m'   # Green
-COLOR_WARNING='\033[1;33m'   # Yellow
-COLOR_INFO='\033[0;34m'      # Blue
-COLOR_DEBUG='\033[0;36m'     # Cyan
-COLOR_RESET='\033[0m'        # Reset
-
-# ========================
-# Output Functions
-# ========================
+COLOR_ERROR='\033[0;31m'
+COLOR_SUCCESS='\033[0;32m'
+COLOR_WARNING='\033[1;33m'
+COLOR_INFO='\033[0;34m'
+COLOR_RESET='\033[0m'
 
 print_success() {
     echo -e "${COLOR_SUCCESS}[SUCCESS]${COLOR_RESET} $1"
@@ -33,10 +22,6 @@ print_info() {
     echo -e "${COLOR_INFO}[INFO]${COLOR_RESET} $1"
 }
 
-print_debug() {
-    echo -e "${COLOR_DEBUG}[DEBUG]${COLOR_RESET} $1"
-}
-
 print_separator() {
     echo -e "${COLOR_INFO}-------------------------------------------------------------------${COLOR_RESET}"
 }
@@ -46,62 +31,43 @@ print_header() {
     echo -e "${COLOR_INFO}$1${COLOR_RESET}"
 }
 
-# ========================
-# Utility Functions
-# ========================
-
 ask_confirmation() {
     local message="$1"
-    echo -e -n "${COLOR_WARNING}$message (y/n): ${COLOR_RESET}"
-    read -r response
-    case "$response" in
-        [yY]) return 0 ;;
-        [nN]) return 1 ;;
-        *)
-            print_error "Please enter 'y' or 'n'"
-            ask_confirmation "$message"
-            ;;
-    esac
+    local response
+
+    while true; do
+        echo -e -n "${COLOR_WARNING}$message (y/n): ${COLOR_RESET}"
+        read -r response
+        case "$response" in
+            [yY]) return 0 ;;
+            [nN]) return 1 ;;
+            *) print_error "Please enter 'y' or 'n'" ;;
+        esac
+    done
 }
 
-# Get absolute directory of the calling script
-get_script_dir() {
-    echo "$( cd "$( dirname "${BASH_SOURCE[1]}" )" &> /dev/null && pwd )"
-}
-
-# Detect platform information
-detect_platform() {
-    export OS_TYPE="$(uname -s)"
-    export ARCH_TYPE="$(uname -m)"
-    print_debug "Platform: ${OS_TYPE} (${ARCH_TYPE})"
-}
-
-# Check if network is available
-# Returns 0 if online, 1 if offline
 is_online() {
     local host="${1:-github.com}"
     local timeout="${2:-3}"
 
-    # Try multiple methods for better compatibility
     if command -v curl &> /dev/null; then
-        # Use curl with timeout
         curl --connect-timeout "$timeout" --silent --head "$host" &> /dev/null
         return $?
-    elif command -v wget &> /dev/null; then
-        # Use wget with timeout
+    fi
+
+    if command -v wget &> /dev/null; then
         wget --timeout="$timeout" --tries=1 --spider --quiet "$host" &> /dev/null
         return $?
-    elif command -v ping &> /dev/null; then
-        # Fallback to ping (may not work if ICMP is blocked)
+    fi
+
+    if command -v ping &> /dev/null; then
         ping -c 1 -W "$timeout" "$host" &> /dev/null
         return $?
-    else
-        # No tool available, assume offline to be safe
-        return 1
     fi
+
+    return 1
 }
 
-# Check network with user feedback
 check_network_status() {
     local host="${1:-github.com}"
 
@@ -114,4 +80,3 @@ check_network_status() {
         return 1
     fi
 }
-

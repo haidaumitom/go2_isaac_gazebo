@@ -1,6 +1,7 @@
 #include "robot_joint_controller_group.hpp"
 #include "hardware_interface/types/hardware_interface_type_values.hpp"
 #include <pluginlib/class_list_macros.hpp>
+#include <sstream>
 
 namespace robot_joint_controller
 {
@@ -110,6 +111,11 @@ CallbackReturn RobotJointControllerGroup::on_configure(const rclcpp_lifecycle::S
     joints_command_subscriber_ = get_node()->create_subscription<robot_msgs::msg::RobotCommand>(
         "~/command", rclcpp::SystemDefaultsQoS(), std::bind(&RobotJointControllerGroup::SetCommandCallback, this, std::placeholders::_1));
 
+    // Start fault-alpha subscriber. Each element is an actuator effectiveness multiplier:
+    // 1.0 = healthy joint, 0.0 = no actuator torque reaches the joint.
+    fault_alpha_subscriber_ = get_node()->create_subscription<std_msgs::msg::Float32MultiArray>(
+        "~/fault_alpha", rclcpp::SystemDefaultsQoS(), std::bind(&RobotJointControllerGroup::SetFaultAlphaCallback, this, std::placeholders::_1));
+
     // Start realtime state publisher
     controller_state_publisher_ = std::make_shared<realtime_tools::RealtimePublisher<robot_msgs::msg::RobotState>>(
         get_node()->create_publisher<robot_msgs::msg::RobotState>(/*name_space_ + */"~/state", rclcpp::SystemDefaultsQoS()));
@@ -155,6 +161,7 @@ CallbackReturn RobotJointControllerGroup::on_activate(const rclcpp_lifecycle::St
     last_command_.motor_command.resize(joint_names_.size());
     last_state_ = robot_msgs::msg::RobotState();
     last_state_.motor_state.resize(joint_names_.size());
+    fault_alpha_.assign(joint_names_.size(), 1.0);
 
     for (int index = 0; index < joint_names_.size(); ++index)
     {
@@ -170,6 +177,8 @@ CallbackReturn RobotJointControllerGroup::on_activate(const rclcpp_lifecycle::St
     // reset command buffer if a command came through callback when controller was inactive
     rt_command_ptr_ = realtime_tools::RealtimeBuffer<robot_msgs::msg::RobotCommand>();
     rt_command_ptr_.writeFromNonRT(last_command_);
+    rt_fault_alpha_ptr_ = realtime_tools::RealtimeBuffer<std::vector<double>>();
+    rt_fault_alpha_ptr_.writeFromNonRT(fault_alpha_);
 
     return CallbackReturn::SUCCESS;
 }
@@ -180,10 +189,13 @@ CallbackReturn RobotJointControllerGroup::on_deactivate(const rclcpp_lifecycle::
     last_command_.motor_command.resize(joint_names_.size());
     last_state_ = robot_msgs::msg::RobotState();
     last_state_.motor_state.resize(joint_names_.size());
+    fault_alpha_.assign(joint_names_.size(), 1.0);
 
     // reset command buffer
     rt_command_ptr_ = realtime_tools::RealtimeBuffer<robot_msgs::msg::RobotCommand>();
     rt_command_ptr_.writeFromNonRT(last_command_);
+    rt_fault_alpha_ptr_ = realtime_tools::RealtimeBuffer<std::vector<double>>();
+    rt_fault_alpha_ptr_.writeFromNonRT(fault_alpha_);
     return CallbackReturn::SUCCESS;
 }
 
@@ -238,6 +250,11 @@ void RobotJointControllerGroup::UpdateFunc(const double &period_seconds)
     std::vector<double> currentPos(joint_names_.size(), 0.0);
     std::vector<double> currentVel(joint_names_.size(), 0.0);
     std::vector<double> calcTorque(joint_names_.size(), 0.0);
+    auto fault_alpha = rt_fault_alpha_ptr_.readFromRT();
+    if (fault_alpha && fault_alpha->size() == joint_names_.size())
+    {
+        fault_alpha_ = *fault_alpha;
+    }
 
     for (int index = 0; index < joint_names_.size(); ++index)
     {
@@ -263,6 +280,7 @@ void RobotJointControllerGroup::UpdateFunc(const double &period_seconds)
         currentVel[index] = (currentPos[index] - (double)(last_state_.motor_state[index].q)) / period_seconds;
         calcTorque[index] = servo_command_.pos_stiffness * (servo_command_.pos - currentPos[index]) + servo_command_.vel_stiffness * (servo_command_.vel - currentVel[index]) + servo_command_.torque;
         EffortLimit(calcTorque[index], index);
+        calcTorque[index] *= fault_alpha_[index];
 
         command_interfaces_[index].set_value(calcTorque[index]);
 
@@ -283,6 +301,46 @@ void RobotJointControllerGroup::SetCommandCallback(const robot_msgs::msg::RobotC
 {
     last_command_ = *msg;
     rt_command_ptr_.writeFromNonRT(last_command_);
+}
+
+void RobotJointControllerGroup::SetFaultAlphaCallback(const std_msgs::msg::Float32MultiArray::SharedPtr msg)
+{
+    if (msg->data.size() != joint_names_.size())
+    {
+        RCLCPP_ERROR_THROTTLE(get_node()->get_logger(), *get_node()->get_clock(), 1000,
+            "fault_alpha size (%zu) does not match number of joints (%zu)",
+            msg->data.size(), joint_names_.size());
+        return;
+    }
+
+    std::vector<double> alpha(joint_names_.size(), 1.0);
+    std::ostringstream fault_stream;
+    bool has_fault = false;
+    for (size_t index = 0; index < joint_names_.size(); ++index)
+    {
+        alpha[index] = std::clamp(static_cast<double>(msg->data[index]), 0.0, 1.0);
+        if (alpha[index] < 0.999)
+        {
+            if (has_fault)
+            {
+                fault_stream << ", ";
+            }
+            fault_stream << joint_names_[index] << "=" << alpha[index];
+            has_fault = true;
+        }
+    }
+
+    rt_fault_alpha_ptr_.writeFromNonRT(alpha);
+
+    if (has_fault)
+    {
+        const std::string fault_summary = fault_stream.str();
+        RCLCPP_WARN(get_node()->get_logger(), "Actuator fault alpha updated: %s", fault_summary.c_str());
+    }
+    else
+    {
+        RCLCPP_INFO(get_node()->get_logger(), "Actuator fault alpha reset: all joints healthy");
+    }
 }
 
 void RobotJointControllerGroup::PositionLimit(double &position, int &index)

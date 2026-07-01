@@ -16,6 +16,9 @@
 #include <memory>
 #include <fstream>
 #include <mutex>
+#include <sstream>
+#include <stdexcept>
+#include <typeinfo>
 
 #include <yaml-cpp/yaml.h>
 #include "fsm.hpp"
@@ -158,7 +161,17 @@ struct YamlParams
     {
         if (config_node[key])
         {
-            return config_node[key].as<T>();
+            try
+            {
+                return config_node[key].as<T>();
+            }
+            catch (const YAML::Exception& e)
+            {
+                std::ostringstream oss;
+                oss << "YAML parameter '" << key << "' cannot be converted to requested type '"
+                    << typeid(T).name() << "': " << e.what();
+                throw std::runtime_error(oss.str());
+            }
         }
         return default_value;
     }
@@ -180,6 +193,7 @@ struct Observations
     std::vector<T> dof_pos;
     std::vector<T> dof_vel;
     std::vector<T> actions;
+    std::vector<T> foot_contacts;
 };
 
 class RL
@@ -217,6 +231,8 @@ public:
     virtual void SetCommand(const RobotCommand<float> *command) = 0;
     void StateController(const RobotState<float> *state, RobotCommand<float> *command);
     void ComputeOutput(const std::vector<float> &actions, std::vector<float> &output_dof_pos, std::vector<float> &output_dof_vel, std::vector<float> &output_dof_tau);
+    void SetGainAlpha(const std::vector<float> &alpha);
+    std::vector<float> GetGainAlpha();
 
     // yaml params
     void ReadYaml(const std::string& file_path, const std::string& file_name);
@@ -259,6 +275,8 @@ public:
 
     // thread safety
     std::mutex model_mutex;
+    std::mutex gain_fault_mutex;
+    std::vector<float> gain_alpha;
 };
 
 class RLFSMState : public FSMState

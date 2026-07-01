@@ -11,6 +11,7 @@
 #include <memory>
 #include <filesystem>
 #include <algorithm>
+#include <cstdint>
 #include "logger.hpp"
 
 #ifdef USE_TORCH
@@ -53,6 +54,14 @@ public:
      * @return Inference result vector
      */
     virtual std::vector<float> forward(const std::vector<std::vector<float>>& inputs) = 0;
+    virtual std::vector<float> forward_with_shapes(
+        const std::vector<std::vector<float>>& inputs,
+        const std::vector<std::vector<int64_t>>& input_shapes
+    )
+    {
+        (void)input_shapes;
+        return forward(inputs);
+    }
 
     /**
      * @brief Get model type string
@@ -83,6 +92,10 @@ public:
     bool load(const std::string& model_path) override;
     bool is_loaded() const override { return loaded_; }
     std::vector<float> forward(const std::vector<std::vector<float>>& inputs) override;
+    std::vector<float> forward_with_shapes(
+        const std::vector<std::vector<float>>& inputs,
+        const std::vector<std::vector<int64_t>>& input_shapes
+    ) override;
     std::string get_model_type() const override { return "torch"; }
 
 private:

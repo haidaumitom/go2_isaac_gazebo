@@ -24,7 +24,13 @@
 #include <unitree/common/time/time_tool.hpp>
 #include <unitree/common/thread/thread.hpp>
 #include <unitree/robot/b2/motion_switcher/motion_switcher_client.hpp>
+#include <chrono>
 #include <csignal>
+#include <ctime>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <sstream>
 
 #if defined(USE_ROS)
 #include <rclcpp/rclcpp.hpp>
@@ -85,6 +91,9 @@ private:
     void SetCommand(const RobotCommand<float> *command) override;
     void RunModel();
     void RobotControl();
+    void InitPolicyDebugCsv();
+    void WritePolicyDebugCsv();
+    void ClosePolicyDebugCsv();
 
     // loop
     std::shared_ptr<LoopFunc> loop_keyboard;
@@ -113,6 +122,11 @@ private:
     ChannelSubscriberPtr<unitree_go::msg::dds_::LowState_> lowstate_subscriber;
     ChannelSubscriberPtr<unitree_go::msg::dds_::WirelessController_> joystick_subscriber;
     xKeySwitchUnion unitree_joy;
+    bool policy_debug_csv_initialized = false;
+    bool policy_debug_csv_enabled = false;
+    int policy_debug_csv_stride = 1;
+    int policy_debug_csv_counter = 0;
+    std::ofstream policy_debug_csv_file;
 
     // others
     std::vector<float> mapped_joint_positions;

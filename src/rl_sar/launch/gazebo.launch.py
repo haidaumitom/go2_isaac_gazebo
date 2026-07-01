@@ -1,9 +1,7 @@
-# Copyright (c) 2024-2025 Ziqi Fan
-# SPDX-License-Identifier: Apache-2.0
-
 import os
 from launch import LaunchDescription
 from launch.actions import IncludeLaunchDescription, DeclareLaunchArgument
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, TextSubstitution, Command
 from launch_ros.actions import Node
@@ -13,6 +11,9 @@ from ament_index_python.packages import get_package_share_directory
 
 def generate_launch_description():
     rname = LaunchConfiguration("rname")
+    enable_foot_contact_bridge = LaunchConfiguration("enable_foot_contact_bridge")
+    foot_contact_threshold = LaunchConfiguration("foot_contact_threshold")
+    foot_contact_debug = LaunchConfiguration("foot_contact_debug")
 
     wname = "earth"
     robot_name = ParameterValue(Command(["echo -n ", rname]), value_type=str)
@@ -94,11 +95,38 @@ def generate_launch_description():
         }],
     )
 
+    foot_contact_bridge_node = Node(
+        package="rl_sar",
+        executable="run_foot_contact_bridge.py",
+        name="foot_contact_bridge",
+        output="screen",
+        condition=IfCondition(enable_foot_contact_bridge),
+        arguments=[
+            "--threshold", foot_contact_threshold,
+            "--debug", foot_contact_debug,
+        ],
+    )
+
     return LaunchDescription([
         DeclareLaunchArgument(
             "rname",
             description="Robot name; this workspace supports go2",
             default_value=TextSubstitution(text=""),
+        ),
+        DeclareLaunchArgument(
+            "enable_foot_contact_bridge",
+            description="Start the Gazebo contact-force to /rl_sar/foot_contacts bridge for FTNet policies.",
+            default_value=TextSubstitution(text="false"),
+        ),
+        DeclareLaunchArgument(
+            "foot_contact_threshold",
+            description="Contact force threshold in Newtons for the FTNet foot contact bridge.",
+            default_value=TextSubstitution(text="1.0"),
+        ),
+        DeclareLaunchArgument(
+            "foot_contact_debug",
+            description="Print FTNet foot contact bridge force/contact values once per second.",
+            default_value=TextSubstitution(text="false"),
         ),
         robot_state_publisher_node,
         gazebo,
@@ -107,4 +135,5 @@ def generate_launch_description():
         # robot_joint_controller_node,  # Spawn in rl_sim.cpp
         joy_node,
         param_node,
+        foot_contact_bridge_node,
     ])
