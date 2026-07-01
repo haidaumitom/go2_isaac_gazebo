@@ -3,7 +3,6 @@
 This workspace runs Unitree Go2 locomotion policies exported from IsaacLab in
 Gazebo Classic and on the real Go2 through the `rl_sar` deployment runtime.
 
-
 ## Repository Layout
 
 ```text
@@ -12,7 +11,7 @@ Gazebo Classic and on the real Go2 through the `rl_sar` deployment runtime.
 |-- policy/go2/                      # exported policies and deployment configs
 |   |-- base.yaml                    # shared Go2 runtime config
 |   |-- isaaclab45_real/             # flat IsaacLab policy, 45 observations
-|   |-- isaaclab48/                  # flat IsaacLab policy, 48 observations
+|   |-- isaaclab48/                  # older IsaacLab baseline policy
 |   |-- rough45/                     # rough-terrain IsaacLab policy
 |   |-- himloco/                     # reference policy
 |   `-- robot_lab/                   # reference policy

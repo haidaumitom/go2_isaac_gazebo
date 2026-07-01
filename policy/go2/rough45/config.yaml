@@ -1,4 +1,4 @@
-go2/rough45_9150:
+go2/rough45:
   model_name: "rough45_policy.pt"
   num_observations: 45
   observations: ["ang_vel", "gravity_vec", "commands", "dof_pos", "dof_vel", "actions"]
