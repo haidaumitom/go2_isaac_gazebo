@@ -145,6 +145,10 @@ public:
     bool load(const std::string& model_path) override;
     bool is_loaded() const override { return loaded_; }
     std::vector<float> forward(const std::vector<std::vector<float>>& inputs) override;
+    std::vector<float> forward_with_shapes(
+        const std::vector<std::vector<float>>& inputs,
+        const std::vector<std::vector<int64_t>>& input_shapes
+    ) override;
     std::string get_model_type() const override { return "onnx"; }
 
 private:

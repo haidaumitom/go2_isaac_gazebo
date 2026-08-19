@@ -207,6 +207,19 @@ bool ONNXModel::load(const std::string& model_path)
 
 std::vector<float> ONNXModel::forward(const std::vector<std::vector<float>>& inputs)
 {
+#ifdef USE_ONNX
+    return this->forward_with_shapes(inputs, input_shapes_);
+#else
+    (void)inputs;
+    throw std::runtime_error("ONNX support not compiled");
+#endif
+}
+
+std::vector<float> ONNXModel::forward_with_shapes(
+    const std::vector<std::vector<float>>& inputs,
+    const std::vector<std::vector<int64_t>>& input_shapes
+)
+{
     if (!loaded_)
     {
         throw std::runtime_error("Model not loaded");
@@ -215,33 +228,54 @@ std::vector<float> ONNXModel::forward(const std::vector<std::vector<float>>& inp
 #ifdef USE_ONNX
     try
     {
-        // Create memory info
-        Ort::MemoryInfo memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+        if (inputs.empty() || inputs.size() != input_shapes.size())
+        {
+            throw std::runtime_error("ONNXModel input data and shape counts do not match");
+        }
+        if (inputs.size() != input_node_names_.size())
+        {
+            throw std::runtime_error("ONNXModel configured input count does not match the model signature");
+        }
 
-        // Get input (use first input only)
-        const auto& input = inputs[0];
-        auto input_shape = session_->GetInputTypeInfo(0).GetTensorTypeAndShapeInfo().GetShape();
+        std::vector<Ort::Value> input_tensors;
+        std::vector<const char*> input_names;
+        input_tensors.reserve(inputs.size());
+        input_names.reserve(inputs.size());
+        for (size_t i = 0; i < inputs.size(); ++i)
+        {
+            int64_t expected_elements = 1;
+            for (int64_t dimension : input_shapes[i])
+            {
+                if (dimension <= 0)
+                {
+                    throw std::runtime_error("ONNXModel input shapes must contain positive dimensions");
+                }
+                expected_elements *= dimension;
+            }
+            if (expected_elements != static_cast<int64_t>(inputs[i].size()))
+            {
+                throw std::runtime_error("ONNXModel input size does not match requested tensor shape");
+            }
 
-        // Create input tensor
-        auto input_tensor = Ort::Value::CreateTensor<float>(
-            memory_info,
-            const_cast<float*>(input.data()),
-            input.size(),
-            input_shape.data(),
-            input_shape.size()
-        );
+            input_tensors.emplace_back(Ort::Value::CreateTensor<float>(
+                memory_info_,
+                const_cast<float*>(inputs[i].data()),
+                inputs[i].size(),
+                input_shapes[i].data(),
+                input_shapes[i].size()
+            ));
+            input_names.push_back(input_node_names_[i].c_str());
+        }
 
-        // Prepare input/output names
-        const char* input_names[] = {input_node_names_[0].c_str()};
-        const char* output_names[] = {output_node_names_[0].c_str()};
+        const char* output_name = output_node_names_[0].c_str();
 
         // Execute inference
         auto outputs = session_->Run(
             Ort::RunOptions{nullptr},
-            input_names,
-            &input_tensor,
-            1,
-            output_names,
+            input_names.data(),
+            input_tensors.data(),
+            input_tensors.size(),
+            &output_name,
             1
         );
 

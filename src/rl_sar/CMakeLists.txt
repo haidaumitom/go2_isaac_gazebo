@@ -73,10 +73,10 @@ set(ONNX_RUNTIME_DIR "${INFERENCE_RUNTIME_DIR}/onnxruntime")
 set(IS_JETSON FALSE)
 if(EXISTS "/etc/nv_tegra_release")
     set(IS_JETSON TRUE)
-    message(STATUS "Jetson platform detected - ONNX Runtime will be disabled")
+    message(STATUS "Jetson platform detected - using the installed CPU ONNX Runtime")
 endif()
 
-if(EXISTS "${ONNX_RUNTIME_DIR}/include" AND EXISTS "${ONNX_RUNTIME_DIR}/lib" AND NOT IS_JETSON)
+if(EXISTS "${ONNX_RUNTIME_DIR}/include" AND EXISTS "${ONNX_RUNTIME_DIR}/lib")
     set(USE_ONNX "ON")
     add_compile_definitions(USE_ONNX)
 

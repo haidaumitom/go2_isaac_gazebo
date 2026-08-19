@@ -17,12 +17,16 @@ ObservationBuffer::ObservationBuffer(int num_envs,
                                      const std::string& priority)
     : num_envs(num_envs),
       obs_dims(obs_dims),
-      history_length(history_length),
-      priority(priority)
+      priority(priority),
+      history_length(history_length)
 {
     if (num_envs <= 0 || history_length <= 0)
     {
         throw std::invalid_argument("num_envs and history_length must be positive");
+    }
+    if (priority != "time" && priority != "term")
+    {
+        throw std::invalid_argument("Observation priority must be 'time' or 'term'");
     }
 
     for (int dim : obs_dims)
@@ -58,6 +62,10 @@ void ObservationBuffer::reset(std::vector<int> reset_idxs, const std::vector<flo
     {
         return;
     }
+    if (new_obs.size() != static_cast<size_t>(num_obs_total))
+    {
+        throw std::invalid_argument("Reset observation size does not match the configured observation dimension");
+    }
 
     // Reset observation buffer for specified environments
     for (int env_idx : reset_idxs)
@@ -78,9 +86,13 @@ void ObservationBuffer::reset(std::vector<int> reset_idxs, const std::vector<flo
 
 void ObservationBuffer::insert(const std::vector<float>& new_obs)
 {
-    if (obs_buf.empty() || new_obs.size() != static_cast<size_t>(num_obs_total))
+    if (obs_buf.empty())
     {
         return;
+    }
+    if (new_obs.size() != static_cast<size_t>(num_obs_total))
+    {
+        throw std::invalid_argument("Inserted observation size does not match the configured observation dimension");
     }
 
     // Shift historical observations forward by one position for all environments
@@ -112,24 +124,19 @@ std::vector<float> ObservationBuffer::get_obs_vec(std::vector<int> obs_ids)
         return std::vector<float>();
     }
 
-    // Calculate output size
-    int output_size = 0;
+    int valid_history_frames = 0;
     for (int obs_id : obs_ids)
     {
-        if (obs_id >= 0 && obs_id < static_cast<int>(obs_dims.size()))
+        if (obs_id < 0 || obs_id >= history_length)
         {
-            output_size += obs_dims[obs_id];
+            throw std::out_of_range("Observation history index is outside the configured buffer");
         }
-    }
-
-    if (output_size == 0)
-    {
-        return std::vector<float>();
+        ++valid_history_frames;
     }
 
     // Create output vector
     std::vector<float> output;
-    output.reserve(num_envs * history_length * output_size);
+    output.reserve(num_envs * valid_history_frames * num_obs_total);
 
     if (this->priority == "time")
     {
@@ -138,14 +145,11 @@ std::vector<float> ObservationBuffer::get_obs_vec(std::vector<int> obs_ids)
         {
             for (int obs_id : obs_ids)
             {
-                if (obs_id >= 0 && obs_id < history_length)
+                // obs_id=0 is newest and obs_id=N is N control steps old.
+                int slice_idx = obs_id;
+                for (int i = 0; i < num_obs_total; ++i)
                 {
-                    // obs_id=0 is newest (at index 0), obs_id=N is oldest (at index N)
-                    int slice_idx = obs_id;
-                    for (int i = 0; i < num_obs_total; ++i)
-                    {
-                        output.push_back(obs_buf[env_idx][slice_idx][i]);
-                    }
+                    output.push_back(obs_buf[env_idx][slice_idx][i]);
                 }
             }
         }
@@ -161,14 +165,10 @@ std::vector<float> ObservationBuffer::get_obs_vec(std::vector<int> obs_ids)
                 int dim = obs_dims[i];
                 for (int step : obs_ids)
                 {
-                    if (step >= 0 && step < history_length)
+                    int time_offset = step;
+                    for (int j = 0; j < dim; ++j)
                     {
-                        // step=0 is newest (at index 0), step=N is oldest (at index N)
-                        int time_offset = step;
-                        for (int j = 0; j < dim; ++j)
-                        {
-                            output.push_back(obs_buf[env_idx][time_offset][obs_offset + j]);
-                        }
+                        output.push_back(obs_buf[env_idx][time_offset][obs_offset + j]);
                     }
                 }
                 obs_offset += dim;

@@ -19,6 +19,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <typeinfo>
+#include <cstdint>
 
 #include <yaml-cpp/yaml.h>
 #include "fsm.hpp"
@@ -182,6 +183,12 @@ struct YamlParams
     }
 };
 
+struct PolicyModelInput
+{
+    std::vector<std::vector<float>> values;
+    std::vector<std::vector<int64_t>> shapes;
+};
+
 template <typename T>
 struct Observations
 {
@@ -216,6 +223,7 @@ public:
     RobotState<float> start_state;
     RobotState<float> now_state;
     bool rl_init_done = false;
+    bool getup_reference_valid = false;
 
     // init
     void InitObservations();
@@ -223,6 +231,9 @@ public:
     void InitControl();
     void InitRL(std::string robot_config_path);
     void InitJointNum(size_t num_joints);
+    void ResetPolicyHistory();
+    PolicyModelInput BuildPolicyModelInput(const std::vector<float>& clamped_obs);
+    void ValidatePolicyModelContract();
 
     // rl functions
     virtual std::vector<float> Forward() = 0;
@@ -249,6 +260,7 @@ public:
     // history buffer
     ObservationBuffer history_obs_buf;
     std::vector<float> history_obs;
+    bool policy_history_initialized = false;
 
     // others
     int motiontime = 0;
@@ -268,6 +280,7 @@ public:
 
     // rl module
     std::unique_ptr<InferenceRuntime::Model> model;
+    YAML::Node base_config_node;
     // output buffer
     std::vector<float> output_dof_tau;
     std::vector<float> output_dof_pos;
