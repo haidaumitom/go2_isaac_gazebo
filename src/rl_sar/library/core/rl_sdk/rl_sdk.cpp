@@ -1,5 +1,32 @@
 #include "rl_sdk.hpp"
 
+#include <cctype>
+#include <cmath>
+
+namespace
+{
+void MergeYamlMap(YAML::Node& destination, const YAML::Node& source)
+{
+    if (!source || !source.IsMap())
+    {
+        throw std::runtime_error("Expected a YAML mapping");
+    }
+
+    for (auto it = source.begin(); it != source.end(); ++it)
+    {
+        destination[it->first.as<std::string>()] = it->second;
+    }
+}
+
+bool IsSafeProfileName(const std::string& profile_name)
+{
+    return !profile_name.empty() && std::all_of(
+        profile_name.begin(), profile_name.end(), [](unsigned char character) {
+            return std::isalnum(character) || character == '_' || character == '-';
+        });
+}
+}
+
 void RL::StateController(const RobotState<float>* state, RobotCommand<float>* command)
 {
     constexpr float linear_command_step = 0.05f;
@@ -219,6 +246,158 @@ void RL::InitControl()
     this->control.yaw = 0.0f;
 }
 
+void RL::ResetPolicyHistory()
+{
+    this->history_obs.clear();
+    this->policy_history_initialized = false;
+
+    const auto observations_history = this->params.Get<std::vector<int>>("observations_history");
+    if (observations_history.empty())
+    {
+        this->history_obs_buf = ObservationBuffer();
+        return;
+    }
+
+    if (std::any_of(observations_history.begin(), observations_history.end(), [](int index) { return index < 0; }))
+    {
+        throw std::runtime_error("observations_history cannot contain negative indices");
+    }
+
+    const std::string priority = this->params.Get<std::string>("observations_history_priority", "time");
+    const int buffer_length = *std::max_element(observations_history.begin(), observations_history.end()) + 1;
+    this->history_obs_buf = ObservationBuffer(1, this->obs_dims, buffer_length, priority);
+}
+
+PolicyModelInput RL::BuildPolicyModelInput(const std::vector<float>& clamped_obs)
+{
+    const int configured_obs_dim = this->params.Get<int>("num_observations", -1);
+    if (configured_obs_dim <= 0)
+    {
+        throw std::runtime_error("num_observations must be a positive integer");
+    }
+    if (clamped_obs.size() != static_cast<size_t>(configured_obs_dim))
+    {
+        std::ostringstream message;
+        message << "Observation size mismatch: config declares " << configured_obs_dim
+                << " values, but the configured terms produced " << clamped_obs.size();
+        throw std::runtime_error(message.str());
+    }
+
+    const std::string configured_mode = this->params.Get<std::string>("model_forward_mode", "single");
+    if (configured_mode != "single" && configured_mode != "flat_history" && configured_mode != "obs_history")
+    {
+        throw std::runtime_error(
+            "Unsupported model_forward_mode '" + configured_mode
+            + "'. Expected single, flat_history, or obs_history");
+    }
+
+    const auto observations_history = this->params.Get<std::vector<int>>("observations_history");
+    const bool history_required = configured_mode == "flat_history" || configured_mode == "obs_history";
+    if (history_required && observations_history.empty())
+    {
+        throw std::runtime_error("model_forward_mode=" + configured_mode + " requires observations_history");
+    }
+
+    if (observations_history.empty())
+    {
+        return {{clamped_obs}, {{1, static_cast<int64_t>(clamped_obs.size())}}};
+    }
+
+    const int history_frames = static_cast<int>(observations_history.size());
+    if (this->params.Has("history_length"))
+    {
+        const int configured_history_length = this->params.Get<int>("history_length");
+        if (configured_history_length != history_frames)
+        {
+            std::ostringstream message;
+            message << "history_length is " << configured_history_length
+                    << ", but observations_history selects " << history_frames << " frames";
+            throw std::runtime_error(message.str());
+        }
+    }
+
+    const std::string priority = this->params.Get<std::string>("observations_history_priority", "time");
+    if (configured_mode == "obs_history" && priority != "time")
+    {
+        throw std::runtime_error("model_forward_mode=obs_history requires observations_history_priority=time");
+    }
+
+    if (this->params.Get<bool>("warm_start_history", false) && !this->policy_history_initialized)
+    {
+        this->history_obs_buf.reset({0}, clamped_obs);
+    }
+    this->history_obs_buf.insert(clamped_obs);
+    this->policy_history_initialized = true;
+    this->history_obs = this->history_obs_buf.get_obs_vec(observations_history);
+
+    const size_t expected_history_values = static_cast<size_t>(history_frames) * clamped_obs.size();
+    if (this->history_obs.size() != expected_history_values)
+    {
+        std::ostringstream message;
+        message << "History buffer produced " << this->history_obs.size()
+                << " values; expected " << expected_history_values;
+        throw std::runtime_error(message.str());
+    }
+
+    if (configured_mode == "obs_history")
+    {
+        return {
+            {clamped_obs, this->history_obs},
+            {
+                {1, static_cast<int64_t>(clamped_obs.size())},
+                {1, static_cast<int64_t>(history_frames), static_cast<int64_t>(clamped_obs.size())}
+            }
+        };
+    }
+
+    return {{this->history_obs}, {{1, static_cast<int64_t>(this->history_obs.size())}}};
+}
+
+void RL::ValidatePolicyModelContract()
+{
+    if (!this->model || !this->model->is_loaded())
+    {
+        throw std::runtime_error("Cannot validate an unloaded policy model");
+    }
+
+    try
+    {
+        const auto observation = this->ComputeObservation();
+        const auto model_input = this->BuildPolicyModelInput(observation);
+        const auto actions = this->model->forward_with_shapes(model_input.values, model_input.shapes);
+        const size_t expected_actions = static_cast<size_t>(this->params.Get<int>("num_of_dofs"));
+        if (actions.size() != expected_actions)
+        {
+            std::ostringstream message;
+            message << "Policy output size mismatch: model returned " << actions.size()
+                    << " actions, but the robot has " << expected_actions << " controlled joints";
+            throw std::runtime_error(message.str());
+        }
+        if (!std::all_of(actions.begin(), actions.end(), [](float action) { return std::isfinite(action); }))
+        {
+            throw std::runtime_error("Policy returned a non-finite action during validation");
+        }
+
+        std::string effective_mode = this->params.Get<std::string>("model_forward_mode", "single");
+        if (effective_mode == "single" && !this->params.Get<std::vector<int>>("observations_history").empty())
+        {
+            effective_mode = "flat_history";
+        }
+        std::cout << LOGGER::INFO << "Validated policy contract - mode: "
+                  << effective_mode
+                  << ", observations: " << observation.size()
+                  << ", inputs: " << model_input.values.size()
+                  << ", actions: " << actions.size() << std::endl;
+    }
+    catch (const std::exception& error)
+    {
+        this->ResetPolicyHistory();
+        throw std::runtime_error(std::string("Policy contract validation failed: ") + error.what());
+    }
+
+    this->ResetPolicyHistory();
+}
+
 void RL::InitJointNum(size_t num_joints)
 {
     this->robot_state.motor_state.resize(num_joints);
@@ -257,13 +436,7 @@ void RL::InitRL(std::string robot_config_path)
     this->InitOutputs();
     this->InitControl();
 
-    // init obs history
-    const auto& observations_history = this->params.Get<std::vector<int>>("observations_history");  // avoid dangling reference
-    if (!observations_history.empty())
-    {
-        int history_length = *std::max_element(observations_history.begin(), observations_history.end()) + 1;
-        this->history_obs_buf = ObservationBuffer(1, this->obs_dims, history_length, this->params.Get<std::string>("observations_history_priority"));
-    }
+    this->ResetPolicyHistory();
 
     // init model
     std::string model_path = std::string(POLICY_DIR) + "/" + robot_config_path + "/" + this->params.Get<std::string>("model_name");
@@ -271,6 +444,10 @@ void RL::InitRL(std::string robot_config_path)
     if (!this->model)
     {
         throw std::runtime_error("Failed to load model from: " + model_path);
+    }
+    if (this->params.Get<bool>("validate_model_on_load", true))
+    {
+        this->ValidatePolicyModelContract();
     }
 }
 
@@ -508,14 +685,49 @@ void RL::ReadYaml(const std::string& file_path, const std::string& file_name)
     }
     catch (YAML::BadFile &e)
     {
-        std::cout << LOGGER::ERROR << "The file '" << config_path << "' does not exist" << std::endl;
-        return;
+        throw std::runtime_error("The file '" + config_path + "' does not exist");
     }
 
-    for (auto it = config.begin(); it != config.end(); ++it)
+    if (!config || !config.IsMap())
     {
-        std::string key = it->first.as<std::string>();
-        this->params.config_node[key] = it->second;
+        throw std::runtime_error("Missing YAML mapping '" + file_path + "' in " + config_path);
+    }
+
+    const bool is_base_config = file_name == "base.yaml";
+    if (!is_base_config && this->base_config_node)
+    {
+        this->params.config_node = YAML::Clone(this->base_config_node);
+    }
+
+    if (!is_base_config && config["profile"])
+    {
+        const std::string profile_name = config["profile"].as<std::string>();
+        if (!IsSafeProfileName(profile_name))
+        {
+            throw std::runtime_error("Invalid policy profile name: " + profile_name);
+        }
+
+        const size_t separator = file_path.find('/');
+        const std::string robot_directory = file_path.substr(0, separator);
+        const std::string profile_path = std::string(POLICY_DIR) + "/" + robot_directory
+            + "/profiles/" + profile_name + ".yaml";
+
+        YAML::Node profile_config;
+        try
+        {
+            profile_config = YAML::LoadFile(profile_path);
+        }
+        catch (YAML::BadFile& error)
+        {
+            throw std::runtime_error("Policy profile file does not exist: " + profile_path);
+        }
+        MergeYamlMap(this->params.config_node, profile_config);
+    }
+
+    MergeYamlMap(this->params.config_node, config);
+    if (is_base_config)
+    {
+        this->base_config_node = YAML::Clone(this->params.config_node);
     }
 }
 
