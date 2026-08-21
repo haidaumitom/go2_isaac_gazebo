@@ -1,0 +1,80 @@
+go2/model_2999:
+  # Reconstructed export of the RSL-RL checkpoint at iteration 2999.
+  # The checkpoint itself does not preserve observation semantics. These
+  # settings follow the repository's CENet/Quadloco 45-value contract and must
+  # still be confirmed from the original training source before real deployment.
+  # The actor consumes the 31-value estimated context before current_obs.
+  model_name: "policy.onnx"
+  model_forward_mode: "obs_history"
+
+  # One current 45-value observation plus five historical frames. The model
+  # receives history from oldest (4) to newest (0).
+  num_observations: 45
+  history_length: 5
+  warm_start_history: true
+  observations_history: [4, 3, 2, 1, 0]
+  observations_history_priority: "time"
+
+  # CENet/Quadloco observation order and scales.
+  observations: ["dof_pos", "dof_vel", "actions", "ang_vel", "gravity_vec", "commands"]
+  clip_obs: 100.0
+  ang_vel_scale: 0.2
+  dof_pos_scale: 1.0
+  dof_vel_scale: 0.05
+  commands_scale: [1.0, 1.0, 1.0]
+
+  clip_actions_lower: [-2.5, -2.5, -2.5, -2.5,
+                       -2.5, -2.5, -2.5, -2.5,
+                       -2.5, -2.5, -2.5, -2.5]
+  clip_actions_upper: [2.5, 2.5, 2.5, 2.5,
+                       2.5, 2.5, 2.5, 2.5,
+                       2.5, 2.5, 2.5, 2.5]
+
+  num_of_dofs: 12
+  action_scale: [0.25, 0.25, 0.25, 0.25,
+                 0.25, 0.25, 0.25, 0.25,
+                 0.25, 0.25, 0.25, 0.25]
+  wheel_indices: []
+
+  rl_kp: [25.0, 25.0, 25.0,
+          25.0, 25.0, 25.0,
+          25.0, 25.0, 25.0,
+          25.0, 25.0, 25.0]
+  rl_kd: [0.5, 0.5, 0.5,
+          0.5, 0.5, 0.5,
+          0.5, 0.5, 0.5,
+          0.5, 0.5, 0.5]
+  fixed_kp: [80.0, 80.0, 80.0,
+             80.0, 80.0, 80.0,
+             80.0, 80.0, 80.0,
+             80.0, 80.0, 80.0]
+  fixed_kd: [3.0, 3.0, 3.0,
+             3.0, 3.0, 3.0,
+             3.0, 3.0, 3.0,
+             3.0, 3.0, 3.0]
+
+  # Policy order: four hips, four thighs, then four calves.
+  default_dof_pos: [0.10, -0.10, 0.10, -0.10,
+                    0.80, 0.80, 1.00, 1.00,
+                    -1.50, -1.50, -1.50, -1.50]
+  joint_mapping: [3, 0, 9, 6,
+                  4, 1, 10, 7,
+                  5, 2, 11, 8]
+  joint_pos_limit_lower: [-1.0472, -1.0472, -1.0472, -1.0472,
+                          -1.5708, -1.5708, -0.5236, -0.5236,
+                          -2.7227, -2.7227, -2.7227, -2.7227]
+  joint_pos_limit_upper: [1.0472, 1.0472, 1.0472, 1.0472,
+                          3.4907, 3.4907, 4.5379, 4.5379,
+                          -0.83776, -0.83776, -0.83776, -0.83776]
+
+  # Keep the history actor active while the command is zero.
+  hold_zero_command: false
+  stand_command_threshold: 0.02
+  policy_debug_csv_enabled: true
+  policy_debug_csv_stride: 1
+  policy_debug_csv_path: ""
+  torque_limits: [23.5, 23.5, 23.5,
+                  23.5, 23.5, 23.5,
+                  23.5, 23.5, 23.5,
+                  23.5, 23.5, 23.5]
+  validate_model_on_load: true

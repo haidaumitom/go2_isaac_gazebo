@@ -1,6 +1,6 @@
-[submodule "src/rl_sar/library/thirdparty/robot_sdk/unitree/unitree_sdk2"]
-	path = src/rl_sar/library/thirdparty/robot_sdk/unitree/unitree_sdk2
-	url = https://github.com/unitreerobotics/unitree_sdk2.git
-[submodule "src/rl_sar/library/thirdparty/joystick"]
-	path = src/rl_sar/library/thirdparty/joystick
-	url = https://github.com/drewnoakes/joystick.git
+[submodule "go2-sim-joystick"]
+  path = go2_isaac_gazebo/src/rl_sar/library/thirdparty/joystick
+  url = https://github.com/drewnoakes/joystick.git
+[submodule "go2-real-unitree-sdk2"]
+  path = go2_real_deployment/rl_sar/src/rl_sar/library/thirdparty/robot_sdk/unitree/unitree_sdk2
+  url = https://github.com/unitreerobotics/unitree_sdk2.git

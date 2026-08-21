@@ -1,0 +1,106 @@
+go2/fault_history_b5:
+  # IsaacLab Stage B v5 compact three-leg recovery actor, exported from
+  # model_10596.pt. Its TorchScript signature is forward([1, 1350]) -> [1, 12].
+  model_name: "fault_history_b5.onnx"
+  model_forward_mode: "flat_history"
+
+  # The actor receives 45 deployable values at each 50 Hz policy step, with
+  # 30 frames flattened term-by-term from oldest (29) to newest (0).
+  num_observations: 45
+  history_length: 30
+  warm_start_history: true
+  observations_history: [29, 28, 27, 26, 25, 24, 23, 22, 21, 20,
+                         19, 18, 17, 16, 15, 14, 13, 12, 11, 10,
+                         9, 8, 7, 6, 5, 4, 3, 2, 1, 0]
+  observations_history_priority: "term"
+  observations: ["dof_pos", "dof_vel", "actions", "ang_vel", "gravity_vec", "commands"]
+  clip_obs: 100.0
+  ang_vel_scale: 0.2
+  dof_pos_scale: 1.0
+  dof_vel_scale: 0.05
+  commands_scale: [1.0, 1.0, 1.0]
+
+  # Match the RSL-RL actor action clip and IsaacLab action scale exactly.
+  clip_actions_lower: [-2.5, -2.5, -2.5, -2.5,
+                       -2.5, -2.5, -2.5, -2.5,
+                       -2.5, -2.5, -2.5, -2.5]
+  clip_actions_upper: [2.5, 2.5, 2.5, 2.5,
+                       2.5, 2.5, 2.5, 2.5,
+                       2.5, 2.5, 2.5, 2.5]
+
+  num_of_dofs: 12
+  action_scale: [0.25, 0.25, 0.25, 0.25,
+                 0.25, 0.25, 0.25, 0.25,
+                 0.25, 0.25, 0.25, 0.25]
+  wheel_indices: []
+
+  # These match the Go2 controller convention used during training.
+  rl_kp: [25.0, 25.0, 25.0,
+          25.0, 25.0, 25.0,
+          25.0, 25.0, 25.0,
+          25.0, 25.0, 25.0]
+  rl_kd: [0.5, 0.5, 0.5,
+          0.5, 0.5, 0.5,
+          0.5, 0.5, 0.5,
+          0.5, 0.5, 0.5]
+  fixed_kp: [80.0, 80.0, 80.0,
+             80.0, 80.0, 80.0,
+             80.0, 80.0, 80.0,
+             80.0, 80.0, 80.0]
+  fixed_kd: [3.0, 3.0, 3.0,
+             3.0, 3.0, 3.0,
+             3.0, 3.0, 3.0,
+             3.0, 3.0, 3.0]
+
+  default_dof_pos: [0.10, -0.10, 0.10, -0.10,
+                    0.80, 0.80, 1.00, 1.00,
+                    -1.50, -1.50, -1.50, -1.50]
+  joint_mapping: [3, 0, 9, 6,
+                  4, 1, 10, 7,
+                  5, 2, 11, 8]
+  joint_pos_limit_lower: [-1.0472, -1.0472, -1.0472, -1.0472,
+                          -1.5708, -1.5708, -0.5236, -0.5236,
+                          -2.7227, -2.7227, -2.7227, -2.7227]
+  joint_pos_limit_upper: [1.0472, 1.0472, 1.0472, 1.0472,
+                          3.4907, 3.4907, 4.5379, 4.5379,
+                          -0.83776, -0.83776, -0.83776, -0.83776]
+
+  # Keep running the policy at a centered command, matching B5's no-standing
+  # recovery phase. Debug CSV is useful for comparing Gazebo and IsaacLab.
+  hold_zero_command: false
+  stand_command_threshold: 0.02
+  # Reproduce the Stage B5 IsaacLab fault in Gazebo. The selected leg is
+  # blended to default_dof_pos + these [hip, thigh, calf] offsets and held.
+  gazebo_tucked_leg_fault_enabled: true
+  gazebo_tucked_leg_fault_topic: "/rl_sar/tucked_leg_fault"
+  gazebo_tuck_joint_offsets: [0.0, 0.85, -0.95]
+  gazebo_tuck_duration_s: 0.75
+
+  # Real-hardware reproduction of the same trained tuck event. This block is
+  # inert unless the executable is launched with RL_SAR_ENABLE_REAL_TUCK_TEST=1.
+  # Laptop F arms for five seconds, T triggers, and P requests passive mode.
+  real_tucked_leg_fault_enabled: true
+  real_tuck_required_policy_config: "fault_history_b5"
+  real_tuck_leg_joint_names: ["FR_hip_joint", "FR_thigh_joint", "FR_calf_joint"]
+  real_tuck_joint_offsets: [0.0, 0.85, -0.95]
+  real_tuck_duration_s: 0.75
+  real_tuck_arm_timeout_s: 5.0
+  real_tuck_arm_command_threshold: 0.03
+  real_tuck_arm_tilt_deg: 15.0
+  real_tuck_abort_tilt_deg: 30.0
+  real_tuck_lowstate_timeout_s: 0.10
+  real_tuck_max_commands: [0.15, 0.10, 0.15]
+  real_tuck_max_joint_velocity: 15.0
+  real_tuck_max_tracking_error: 0.45
+  real_tuck_tracking_grace_s: 0.25
+  real_tuck_max_torque: 23.0
+  real_tuck_max_motor_temperature_c: 70.0
+  real_tuck_violation_hold_s: 0.15
+  policy_debug_csv_enabled: true
+  policy_debug_csv_stride: 1
+  policy_debug_csv_path: ""
+  torque_limits: [23.5, 23.5, 23.5,
+                  23.5, 23.5, 23.5,
+                  23.5, 23.5, 23.5,
+                  23.5, 23.5, 23.5]
+  validate_model_on_load: true
